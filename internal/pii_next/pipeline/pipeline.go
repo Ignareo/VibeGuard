@@ -135,19 +135,23 @@ func (p *Pipeline) RedactWithMatches(input []byte) ([]byte, []redact.Match) {
 		insert(s)
 	}
 
-	// Replace in reverse start order to avoid index shifting.
+	// Replace in a single pass over the input (matches are non-overlapping and sorted by
+	// start), avoiding the O(n) splice per match of the previous descending-order approach.
 	sort.Slice(selected, func(i, j int) bool {
 		if selected[i].Start != selected[j].Start {
-			return selected[i].Start > selected[j].Start
+			return selected[i].Start < selected[j].Start
 		}
-		return selected[i].End > selected[j].End
+		return selected[i].End < selected[j].End
 	})
 
-	result := make([]byte, len(input))
-	copy(result, input)
+	result := make([]byte, 0, len(input))
+	cursor := 0
 
 	outMatches := make([]redact.Match, 0, len(selected))
 	for _, m := range selected {
+		if m.Start < cursor || m.Start < 0 || m.End > len(input) || m.Start >= m.End {
+			continue
+		}
 		original := string(input[m.Start:m.End])
 
 		placeholder, ok := p.sess.LookupReverse(original)
@@ -164,8 +168,11 @@ func (p *Pipeline) RedactWithMatches(input []byte) ([]byte, []redact.Match) {
 			Placeholder: placeholder,
 		})
 
-		result = append(result[:m.Start], append([]byte(placeholder), result[m.End:]...)...)
+		result = append(result, input[cursor:m.Start]...)
+		result = append(result, placeholder...)
+		cursor = m.End
 	}
+	result = append(result, input[cursor:]...)
 
 	return result, outMatches
 }

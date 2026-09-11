@@ -259,17 +259,21 @@ func (e *Engine) RedactWithMatches(input []byte) ([]byte, []Match) {
 		}
 	}
 
-	// planned segments are non-overlapping; sort by start desc for safe in-place replacement.
+	// planned segments are non-overlapping; sort by start ascending for a single-pass rebuild
+	// (avoids the O(n) splice per match of the previous descending-order approach).
 	sort.Slice(planned, func(i, j int) bool {
-		return planned[i].Start > planned[j].Start
+		return planned[i].Start < planned[j].Start
 	})
 
-	// Apply replacements
-	result := make([]byte, len(input))
-	copy(result, input)
+	result := make([]byte, 0, len(input))
+	cursor := 0
+	kept := planned[:0]
 
 	for i := range planned {
 		m := &planned[i]
+		if m.Start < cursor || m.Start < 0 || m.End > len(input) || m.Start >= m.End {
+			continue
+		}
 		// Reuse existing mapping first (important for WAL restore across restarts),
 		// otherwise generate and register a new placeholder.
 		placeholder, ok := e.session.LookupReverse(m.Original)
@@ -280,11 +284,14 @@ func (e *Engine) RedactWithMatches(input []byte) ([]byte, []Match) {
 
 		m.Placeholder = placeholder
 
-		// Replace in result
-		result = append(result[:m.Start], append([]byte(placeholder), result[m.End:]...)...)
+		result = append(result, input[cursor:m.Start]...)
+		result = append(result, placeholder...)
+		cursor = m.End
+		kept = append(kept, *m)
 	}
+	result = append(result, input[cursor:]...)
 
-	return result, planned
+	return result, kept
 }
 
 // isExcluded checks if a value is in the exclude list
