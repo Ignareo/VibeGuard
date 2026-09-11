@@ -135,7 +135,7 @@ patterns:
 Use it in your coding CLI (does not affect your current terminal):
 
 ```bash
-vibeguard claude [args...]  # replace with: codex / opencode / qwen / gemini
+vibeguard claude [args...]  # replace with: codex / opencode / qwen / gemini / kimi
 ```
 
 Use it for a specific command (does not affect your current terminal):

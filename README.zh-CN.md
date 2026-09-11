@@ -138,7 +138,7 @@ patterns:
 在你的编程CLI中使用（不影响当前终端）
 
 ```bash
-vibeguard claude [args...]     #claude可换为codex、opencode、qwen、gemini
+vibeguard claude [args...]     #claude可换为codex、opencode、qwen、gemini、kimi
 ```
 
 在指定的命令中使用（不影响当前终端）

@@ -160,6 +160,7 @@ var codexCmd = newAssistantProxyCmd("codex", "Codex")
 var geminiCmd = newAssistantProxyCmd("gemini", "Gemini")
 var opencodeCmd = newAssistantProxyCmd("opencode", "OpenCode")
 var qwenCmd = newAssistantProxyCmd("qwen", "Qwen")
+var kimiCmd = newAssistantProxyCmd("kimi", "Kimi Code")
 
 var initCmd = &cobra.Command{
 	Use:   "init",
@@ -209,6 +210,7 @@ func init() {
 	rootCmd.AddCommand(geminiCmd)
 	rootCmd.AddCommand(opencodeCmd)
 	rootCmd.AddCommand(qwenCmd)
+	rootCmd.AddCommand(kimiCmd)
 	rootCmd.AddCommand(initCmd)
 	rootCmd.AddCommand(trustCmd)
 	rootCmd.AddCommand(testCmd)
@@ -1041,6 +1043,12 @@ log:
     enabled: true
   - host: generativelanguage.googleapis.com
     enabled: true
+  - host: api.moonshot.cn
+    enabled: true
+  - host: api.moonshot.ai
+    enabled: true
+  - host: api.kimi.com
+    enabled: true
 
 	# Sensitive data matching rules
 	patterns:
@@ -1077,6 +1085,12 @@ targets:
   - host: api2.cursor.sh
     enabled: true
   - host: generativelanguage.googleapis.com
+    enabled: true
+  - host: api.moonshot.cn
+    enabled: true
+  - host: api.moonshot.ai
+    enabled: true
+  - host: api.kimi.com
     enabled: true
 
 # Sensitive data patterns

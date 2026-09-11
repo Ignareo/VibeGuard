@@ -622,5 +622,6 @@ Write-Host "     vibeguard claude [args...]"
 Write-Host "     vibeguard gemini [args...]"
 Write-Host "     vibeguard opencode [args...]"
 Write-Host "     vibeguard qwen [args...]"
+Write-Host "     vibeguard kimi [args...]"
 Write-Host "     vibeguard run <command> [args...]"
 Write-Host (T "  4) IDE/GUI（如 Cursor）在软件设置里把代理地址填为：$proxyUrl" "  4) For IDE/GUI apps (Cursor, etc), set the proxy URL to: $proxyUrl")

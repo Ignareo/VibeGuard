@@ -183,6 +183,9 @@ var defaultConfig = Config{
 		{Host: "api.openai.com", Enabled: true},
 		{Host: "api2.cursor.sh", Enabled: true},
 		{Host: "generativelanguage.googleapis.com", Enabled: true},
+		{Host: "api.moonshot.cn", Enabled: true},
+		{Host: "api.moonshot.ai", Enabled: true},
+		{Host: "api.kimi.com", Enabled: true},
 	},
 	Session: SessionConfig{
 		TTL:                       "1h",

@@ -473,7 +473,7 @@ ensure_shell_helper_in_rc() {
   fi
   shift || true
   case "$sub" in
-    claude|codex|gemini|opencode|qwen)
+    claude|codex|gemini|opencode|qwen|kimi)
       if [ -n "${VIBEGUARD_CA_CERT:-}" ] && [ -f "$VIBEGUARD_CA_CERT" ]; then
         HTTPS_PROXY="$VIBEGUARD_PROXY_URL" HTTP_PROXY="$VIBEGUARD_PROXY_URL" \
         https_proxy="$VIBEGUARD_PROXY_URL" http_proxy="$VIBEGUARD_PROXY_URL" \
@@ -1410,5 +1410,6 @@ echo "     vibeguard claude [args...]"
 echo "     vibeguard gemini [args...]"
 echo "     vibeguard opencode [args...]"
 echo "     vibeguard qwen [args...]"
+echo "     vibeguard kimi [args...]"
 echo "     vibeguard run <command> [args...]"
 echo "  4) $(t "IDE/GUI（如 Cursor）在软件设置里把代理地址填为" "For IDE/GUI apps (Cursor, etc), set the proxy URL to"): ${proxy_url}"
