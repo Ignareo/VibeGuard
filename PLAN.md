@@ -121,7 +121,7 @@
 | P1-1 invalid_json 回退 | ☑ |
 | P1-2 JSON 字段覆盖 | ☑ |
 | P1-3 system-reminder 豁免 | ☑ |
-| P1-4 SSE delta 还原 | ☐ |
+| P1-4 SSE delta 还原 | ☑ |
 | P1-5 审计库防泄密 | ☐ |
 | P2-1 归一化防绕过 | ☐ |
 | P2-2 元审计+防爆破 | ☐ |

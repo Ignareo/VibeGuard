@@ -3,6 +3,7 @@ package stream
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"strings"
 
@@ -21,21 +22,25 @@ type SSERestoringReader struct {
 	outBuf   bytes.Buffer // restored bytes ready for downstream
 	readBuf  []byte       // reusable upstream read buffer
 
-	// pendingDelta stores the most recent delta event. On stream end, we flush the tail into it
-	// to avoid losing buffered placeholder prefixes (e.g. the stream ends with "__V").
-	pendingDelta *pendingDeltaEvent
-	textRestorer *textStreamRestorer
+	// pending maps a stream key (chat choice index, Anthropic content block index, or
+	// Responses output_index+content_index) to the most recent delta event of that stream.
+	// On stream end, buffered placeholder tails are flushed into the pending event of the
+	// matching stream.
+	pending     map[string]*pendingDeltaEvent
+	pendingKeys []string // insertion order, for deterministic flushing
+	// restorers holds one cross-chunk text restorer per stream key, so interleaved outputs
+	// (e.g. multiple chat.completions choices or Anthropic content blocks) never mix fragments.
+	restorers map[string]*textStreamRestorer
 }
 
 // NewSSERestoringReader creates a new SSE restoring reader
 func NewSSERestoringReader(upstream io.ReadCloser, restorer *restore.Engine) *SSERestoringReader {
 	return &SSERestoringReader{
-		upstream: upstream,
-		restorer: restorer,
-		readBuf:  make([]byte, 4096),
-		// Treat this as a single text stream for now (common in Codex/Responses API).
-		// If we need parallel outputs later (output_index/content_index), extend to a map.
-		textRestorer: newTextStreamRestorer(restorer),
+		upstream:  upstream,
+		restorer:  restorer,
+		readBuf:   make([]byte, 4096),
+		pending:   make(map[string]*pendingDeltaEvent),
+		restorers: make(map[string]*textStreamRestorer),
 	}
 }
 
@@ -72,7 +77,7 @@ func (r *SSERestoringReader) Read(p []byte) (int, error) {
 
 		if err != nil {
 			// On EOF/error, flush remaining buffered bytes
-			r.flushPendingDelta(true)
+			r.flushAllPending(true)
 			if r.buf.Len() > 0 {
 				remaining := make([]byte, r.buf.Len())
 				copy(remaining, r.buf.Bytes())
@@ -100,16 +105,13 @@ type pendingDeltaEvent struct {
 	eventSep []byte   // "\n\n" or "\r\n\r\n"
 	before   [][]byte // non-data lines before the first data line
 	after    [][]byte // non-data lines after data lines
-	deltaLoc deltaTextLocation
 	obj      map[string]any
+	fields   []deltaField
 }
 
-func (e *pendingDeltaEvent) emit(extra string) []byte {
+func (e *pendingDeltaEvent) emit() []byte {
 	if e == nil {
 		return nil
-	}
-	if extra != "" {
-		appendDeltaText(e.obj, e.deltaLoc, extra)
 	}
 	b, _ := json.Marshal(e.obj)
 
@@ -383,16 +385,52 @@ func (r *RestoringReader) Close() error {
 	return r.upstream.Close()
 }
 
-func (r *SSERestoringReader) flushPendingDelta(final bool) {
-	if r.pendingDelta == nil {
+func (r *SSERestoringReader) restorerFor(key string) *textStreamRestorer {
+	tr, ok := r.restorers[key]
+	if !ok {
+		tr = newTextStreamRestorer(r.restorer)
+		r.restorers[key] = tr
+	}
+	return tr
+}
+
+// flushPendingEvent emits a pending delta event. When final, the buffered placeholder
+// tails of the event's streams are restored and appended to their text fields first.
+func (r *SSERestoringReader) flushPendingEvent(pe *pendingDeltaEvent, final bool) {
+	if pe == nil {
 		return
 	}
-	extra := ""
-	if final && r.textRestorer != nil {
-		extra = r.textRestorer.Flush()
+	if final {
+		for _, f := range pe.fields {
+			if tr, ok := r.restorers[f.key]; ok {
+				if extra := tr.Flush(); extra != "" {
+					appendByPath(pe.obj, f.path, extra)
+				}
+			}
+		}
 	}
-	r.outBuf.Write(r.pendingDelta.emit(extra))
-	r.pendingDelta = nil
+	r.outBuf.Write(pe.emit())
+	// Drop every key pointing at this event (one event may carry several streams).
+	kept := r.pendingKeys[:0]
+	for _, k := range r.pendingKeys {
+		if r.pending[k] == pe {
+			delete(r.pending, k)
+			continue
+		}
+		kept = append(kept, k)
+	}
+	r.pendingKeys = kept
+}
+
+func (r *SSERestoringReader) flushPendingKey(key string, final bool) {
+	r.flushPendingEvent(r.pending[key], final)
+}
+
+func (r *SSERestoringReader) flushAllPending(final bool) {
+	keys := append([]string(nil), r.pendingKeys...)
+	for _, k := range keys {
+		r.flushPendingKey(k, final)
+	}
 }
 
 func (r *SSERestoringReader) handleEvent(event []byte) {
@@ -403,55 +441,62 @@ func (r *SSERestoringReader) handleEvent(event []byte) {
 	parsed, ok := parseSSEEvent(event)
 	if !ok {
 		// If parsing fails, do a byte-level fallback restore.
-		r.flushPendingDelta(false)
+		r.flushAllPending(true)
 		r.outBuf.Write(r.restorer.Restore(event))
 		return
 	}
 
-	// Terminal events like [DONE] / done / completed: flush pendingDelta (with tail) first, then emit the terminal event.
+	// Terminal events like [DONE] / done / completed: flush pending deltas (with tails) first, then emit the terminal event.
 	if parsed.isTerminal {
-		r.flushPendingDelta(true)
+		r.flushAllPending(true)
 		r.outBuf.Write(r.restorer.Restore(event))
 		return
 	}
 
 	// Try parsing data as JSON to check whether this is a delta event.
-	obj, loc, isDelta := parseDeltaJSON(parsed)
+	obj, fields, isDelta := parseDeltaJSON(parsed)
 	if !isDelta {
-		// Non-delta: if JSON type indicates done/completed, treat it as terminal and flush tail.
-		if terminalByJSONType(parsed) {
-			r.flushPendingDelta(true)
-		} else {
-			r.flushPendingDelta(false)
-		}
+		// Non-delta protocol event (e.g. Anthropic content_block_stop): flush pending
+		// deltas with their restorer tails. Placeholders do not span protocol events in
+		// practice, and restoring a block-final placeholder here is better than losing it.
+		r.flushAllPending(true)
 		r.outBuf.Write(r.restorer.Restore(event))
 		return
 	}
 
-	// Delta event: emit the previous pendingDelta first, then store current delta (one-event delay for tail flush on EOF).
-	r.flushPendingDelta(false)
-
-	deltaStr, ok := getDeltaText(obj, loc)
-	if !ok {
-		// parseDeltaJSON should guarantee a valid loc; if not, fall back to byte-level restore to avoid breaking downstream protocol.
-		r.outBuf.Write(r.restorer.Restore(event))
-		return
+	// Delta event: emit the previous pending delta of each involved stream first
+	// (per-stream FIFO is preserved; cross-stream reordering is harmless because
+	// chat.completions / Anthropic / Responses deltas all carry their stream index).
+	for _, f := range fields {
+		r.flushPendingKey(f.key, false)
 	}
-	emitted := ""
-	if r.textRestorer != nil {
-		emitted = r.textRestorer.Feed(deltaStr)
-	} else {
-		emitted = string(r.restorer.Restore([]byte(deltaStr)))
-	}
-	setDeltaText(obj, loc, emitted)
 
-	r.pendingDelta = &pendingDeltaEvent{
+	pe := &pendingDeltaEvent{
 		lineSep:  parsed.lineSep,
 		eventSep: parsed.eventSep,
 		before:   parsed.before,
 		after:    parsed.after,
-		deltaLoc: loc,
 		obj:      obj,
+	}
+	for _, f := range fields {
+		text, ok := getByPath(obj, f.path)
+		if !ok {
+			continue
+		}
+		emitted := r.restorerFor(f.key).Feed(text)
+		setByPath(obj, f.path, emitted)
+		pe.fields = append(pe.fields, f)
+	}
+	if len(pe.fields) == 0 {
+		// parseDeltaJSON should guarantee valid paths; if not, fall back to byte-level restore to avoid breaking downstream protocol.
+		r.outBuf.Write(r.restorer.Restore(event))
+		return
+	}
+	for _, f := range pe.fields {
+		if _, exists := r.pending[f.key]; !exists {
+			r.pendingKeys = append(r.pendingKeys, f.key)
+		}
+		r.pending[f.key] = pe
 	}
 }
 
@@ -535,112 +580,196 @@ func parseSSEEvent(event []byte) (parsedEvent, bool) {
 	return p, true
 }
 
-type deltaTextLocation struct {
-	root   string
-	nested string // optional
+// navigatePath walks obj along path (string map keys and int array indices) and returns
+// the value found there.
+func navigatePath(obj map[string]any, path []any) (any, bool) {
+	var cur any = obj
+	for _, seg := range path {
+		switch s := seg.(type) {
+		case string:
+			m, ok := cur.(map[string]any)
+			if !ok {
+				return nil, false
+			}
+			cur, ok = m[s]
+			if !ok {
+				return nil, false
+			}
+		case int:
+			arr, ok := cur.([]any)
+			if !ok || s < 0 || s >= len(arr) {
+				return nil, false
+			}
+			cur = arr[s]
+		default:
+			return nil, false
+		}
+	}
+	return cur, true
 }
 
-func getDeltaText(obj map[string]any, loc deltaTextLocation) (string, bool) {
-	if obj == nil || loc.root == "" {
-		return "", false
-	}
-	v, ok := obj[loc.root]
+func getByPath(obj map[string]any, path []any) (string, bool) {
+	cur, ok := navigatePath(obj, path)
 	if !ok {
 		return "", false
 	}
-	if loc.nested == "" {
-		s, ok := v.(string)
-		return s, ok
-	}
-	m, ok := v.(map[string]any)
-	if !ok {
-		return "", false
-	}
-	s, ok := m[loc.nested].(string)
+	s, ok := cur.(string)
 	return s, ok
 }
 
-func setDeltaText(obj map[string]any, loc deltaTextLocation, text string) bool {
-	if obj == nil || loc.root == "" {
+func setByPath(obj map[string]any, path []any, text string) bool {
+	if obj == nil || len(path) == 0 {
 		return false
 	}
-	v, ok := obj[loc.root]
-	if loc.nested == "" {
-		obj[loc.root] = text
+	parent, ok := navigatePath(obj, path[:len(path)-1])
+	if !ok {
+		return false
+	}
+	switch last := path[len(path)-1].(type) {
+	case string:
+		m, ok := parent.(map[string]any)
+		if !ok {
+			return false
+		}
+		m[last] = text
+		return true
+	case int:
+		arr, ok := parent.([]any)
+		if !ok || last < 0 || last >= len(arr) {
+			return false
+		}
+		arr[last] = text
 		return true
 	}
-	if !ok {
-		return false
-	}
-	m, ok := v.(map[string]any)
-	if !ok {
-		return false
-	}
-	m[loc.nested] = text
-	return true
+	return false
 }
 
-func appendDeltaText(obj map[string]any, loc deltaTextLocation, extra string) bool {
+func appendByPath(obj map[string]any, path []any, extra string) bool {
 	if extra == "" {
 		return true
 	}
-	cur, ok := getDeltaText(obj, loc)
+	cur, ok := getByPath(obj, path)
 	if !ok {
 		return false
 	}
-	return setDeltaText(obj, loc, cur+extra)
+	return setByPath(obj, path, cur+extra)
 }
 
-func parseDeltaJSON(p parsedEvent) (obj map[string]any, loc deltaTextLocation, ok bool) {
+// deltaField identifies a restorable text field inside an SSE delta JSON object: the
+// stream key selects the cross-chunk restorer, the path locates the text inside the object.
+type deltaField struct {
+	key  string
+	path []any
+}
+
+func parseDeltaJSON(p parsedEvent) (obj map[string]any, fields []deltaField, ok bool) {
 	dataTrim := bytes.TrimSpace(p.data)
 	if len(dataTrim) == 0 || dataTrim[0] != '{' {
-		return nil, deltaTextLocation{}, false
+		return nil, nil, false
 	}
 
 	if err := json.Unmarshal(dataTrim, &obj); err != nil {
-		return nil, deltaTextLocation{}, false
+		return nil, nil, false
 	}
 
-	// Delta detection: prefer SSE event name, then fall back to JSON type.
+	// OpenAI chat.completions chunks: {"choices":[{"index":0,"delta":{"content":"..."}}]}.
+	// They carry no "delta" marker in the event name or type, so detect them structurally.
+	if choices, isArr := obj["choices"].([]any); isArr {
+		for i, c := range choices {
+			cm, isMap := c.(map[string]any)
+			if !isMap {
+				continue
+			}
+			d, isMap := cm["delta"].(map[string]any)
+			if !isMap {
+				continue
+			}
+			idx := i
+			if v, isNum := cm["index"].(float64); isNum {
+				idx = int(v)
+			}
+			if _, isStr := d["content"].(string); isStr {
+				fields = append(fields, deltaField{
+					key:  fmt.Sprintf("chat:%d:content", idx),
+					path: []any{"choices", i, "delta", "content"},
+				})
+			}
+			if tcs, isArr := d["tool_calls"].([]any); isArr {
+				for j, tc := range tcs {
+					tcm, isMap := tc.(map[string]any)
+					if !isMap {
+						continue
+					}
+					fn, isMap := tcm["function"].(map[string]any)
+					if !isMap {
+						continue
+					}
+					if _, isStr := fn["arguments"].(string); !isStr {
+						continue
+					}
+					tcIdx := j
+					if v, isNum := tcm["index"].(float64); isNum {
+						tcIdx = int(v)
+					}
+					fields = append(fields, deltaField{
+						key:  fmt.Sprintf("chat:%d:tool:%d", idx, tcIdx),
+						path: []any{"choices", i, "delta", "tool_calls", j, "function", "arguments"},
+					})
+				}
+			}
+		}
+		if len(fields) > 0 {
+			return obj, fields, true
+		}
+	}
+
+	// Delta detection for the remaining formats: prefer SSE event name, then fall back to JSON type.
 	nameLower := strings.ToLower(p.eventName)
 	typLower := ""
-	if typ, ok := obj["type"].(string); ok {
+	if typ, isStr := obj["type"].(string); isStr {
 		typLower = strings.ToLower(typ)
 	}
-	isDeltaEvent := strings.Contains(nameLower, "delta") || strings.Contains(typLower, "delta")
-	if !isDeltaEvent {
-		return nil, deltaTextLocation{}, false
+	if !strings.Contains(nameLower, "delta") && !strings.Contains(typLower, "delta") {
+		return nil, nil, false
 	}
 
-	// OpenAI-compatible implementations: {"delta":"..."}
-	if _, ok := obj["delta"].(string); ok {
-		return obj, deltaTextLocation{root: "delta"}, true
+	// Responses API: {"type":"response.output_text.delta","delta":"...","output_index":0,"content_index":0}
+	if _, isStr := obj["delta"].(string); isStr {
+		key := "delta"
+		if oi, isNum := obj["output_index"].(float64); isNum {
+			ci := 0
+			if v, isNum := obj["content_index"].(float64); isNum {
+				ci = int(v)
+			}
+			key = fmt.Sprintf("resp:%d:%d", int(oi), ci)
+		}
+		return obj, []deltaField{{key: key, path: []any{"delta"}}}, true
 	}
-	// Anthropic：{"delta":{"text":"...","type":"text_delta"}}
-	if m, ok := obj["delta"].(map[string]any); ok {
-		if _, ok := m["text"].(string); ok {
-			return obj, deltaTextLocation{root: "delta", nested: "text"}, true
+
+	// Anthropic content_block_delta: {"index":0,"delta":{"type":"text_delta","text":"..."}} or
+	// {"index":1,"delta":{"type":"input_json_delta","partial_json":"..."}} (streamed tool input).
+	if m, isMap := obj["delta"].(map[string]any); isMap {
+		idx := 0
+		if v, isNum := obj["index"].(float64); isNum {
+			idx = int(v)
+		}
+		if _, isStr := m["text"].(string); isStr {
+			fields = append(fields, deltaField{
+				key:  fmt.Sprintf("anth:%d:text", idx),
+				path: []any{"delta", "text"},
+			})
+		}
+		if _, isStr := m["partial_json"].(string); isStr {
+			fields = append(fields, deltaField{
+				key:  fmt.Sprintf("anth:%d:json", idx),
+				path: []any{"delta", "partial_json"},
+			})
+		}
+		if len(fields) > 0 {
+			return obj, fields, true
 		}
 	}
 
 	// Unrecognized: do not write delta maps back as strings, or the protocol structure would be corrupted.
-	return nil, deltaTextLocation{}, false
-}
-
-func terminalByJSONType(p parsedEvent) bool {
-	dataTrim := bytes.TrimSpace(p.data)
-	if len(dataTrim) == 0 || dataTrim[0] != '{' {
-		return false
-	}
-
-	var obj map[string]any
-	if err := json.Unmarshal(dataTrim, &obj); err != nil {
-		return false
-	}
-	typ, ok := obj["type"].(string)
-	if !ok || typ == "" {
-		return false
-	}
-	tl := strings.ToLower(typ)
-	return strings.Contains(tl, "done") || strings.Contains(tl, "completed") || strings.Contains(tl, "complete")
+	return nil, nil, false
 }
