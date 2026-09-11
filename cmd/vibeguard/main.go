@@ -1036,6 +1036,14 @@ log:
   file: %s
   level: info
 
+# Optional: persist audit events to SQLite (full build only). Raw matched values are never
+# persisted unless persist_raw_values is explicitly enabled.
+# audit_db:
+#   enabled: false
+#   path: ~/.vibeguard/audit.db
+#   retention: 7d
+#   persist_raw_values: false
+
 	# Target hosts to intercept (AI API endpoints)
 	targets:
   - host: api.anthropic.com
@@ -1081,6 +1089,14 @@ session:
 log:
   file: %s
   level: info
+
+# Optional: persist audit events to SQLite (full build only). Raw matched values are never
+# persisted unless persist_raw_values is explicitly enabled.
+# audit_db:
+#   enabled: false
+#   path: ~/.vibeguard/audit.db
+#   retention: 7d
+#   persist_raw_values: false
 
 # Target hosts to intercept (AI API endpoints)
 targets:

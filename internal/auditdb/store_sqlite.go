@@ -42,6 +42,10 @@ type Store struct {
 	mu sync.Mutex
 	db *sql.DB
 
+	path string
+	// walChmod ensures the lazily created -wal/-shm sidecar files get tightened once.
+	walChmod sync.Once
+
 	insertStmt *sql.Stmt
 	updateStmt *sql.Stmt
 }
@@ -62,6 +66,13 @@ func Open(path string) (*Store, error) {
 	if _, err := db.Exec(schema); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("auditdb: schema: %w", err)
+	}
+
+	// The database file may contain previews of sensitive matches; never leave it
+	// world/group-readable (the driver creates it with umask defaults, typically 0644).
+	if err := chmodPrivateDBFiles(path); err != nil {
+		_ = db.Close()
+		return nil, err
 	}
 
 	ins, err := db.Prepare(`INSERT INTO audit_events
@@ -85,7 +96,20 @@ func Open(path string) (*Store, error) {
 		return nil, fmt.Errorf("auditdb: prepare update: %w", err)
 	}
 
-	return &Store{db: db, insertStmt: ins, updateStmt: upd}, nil
+	return &Store{db: db, path: path, insertStmt: ins, updateStmt: upd}, nil
+}
+
+// chmodPrivateDBFiles tightens permissions on the database and its WAL/SHM sidecars.
+func chmodPrivateDBFiles(path string) error {
+	for _, p := range []string{path, path + "-wal", path + "-shm"} {
+		if err := os.Chmod(p, 0600); err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			return fmt.Errorf("auditdb: chmod %s: %w", p, err)
+		}
+	}
+	return nil
 }
 
 // MaxID returns the largest id in the table (used to avoid ID collisions after restart).
@@ -127,6 +151,12 @@ func (s *Store) Add(ev AuditEvent) (AuditEvent, error) {
 	if err != nil {
 		return ev, fmt.Errorf("auditdb: insert: %w", err)
 	}
+	// The WAL/SHM sidecars are created lazily on the first write; tighten them once.
+	s.walChmod.Do(func() {
+		if err := chmodPrivateDBFiles(s.path); err != nil {
+			slog.Warn("auditdb: failed to tighten sidecar file permissions", "error", err)
+		}
+	})
 	return ev, nil
 }
 

@@ -147,6 +147,10 @@ type AuditDBConfig struct {
 	Path string `yaml:"path"`
 	// Retention is the retention duration (time.ParseDuration; also supports "7d" for days).
 	Retention string `yaml:"retention"`
+	// PersistRawValues controls whether raw matched values may be written to the audit DB.
+	// Default false: only previews (first2…last2) are persisted, even when the admin UI is
+	// allowed to display originals (log.redact_log=false).
+	PersistRawValues bool `yaml:"persist_raw_values"`
 }
 
 // Default configuration values
@@ -205,9 +209,10 @@ var defaultConfig = Config{
 		RedactLog: true,
 	},
 	AuditDB: AuditDBConfig{
-		Enabled:   false,
-		Path:      "~/.vibeguard/audit.db",
-		Retention: "7d",
+		Enabled:          false,
+		Path:             "~/.vibeguard/audit.db",
+		Retention:        "7d",
+		PersistRawValues: false,
 	},
 }
 
@@ -845,6 +850,9 @@ func mergeConfigs(global, project Config) Config {
 	}
 	if strings.TrimSpace(project.AuditDB.Retention) != "" {
 		result.AuditDB.Retention = project.AuditDB.Retention
+	}
+	if project.AuditDB.PersistRawValues {
+		result.AuditDB.PersistRawValues = true
 	}
 
 	return result

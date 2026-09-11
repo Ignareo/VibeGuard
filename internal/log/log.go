@@ -14,15 +14,17 @@ func Setup(logPath string, level string) error {
 
 	// Ensure log directory exists
 	logDir := filepath.Dir(logPath)
-	if err := os.MkdirAll(logDir, 0755); err != nil {
+	if err := os.MkdirAll(logDir, 0700); err != nil {
 		return err
 	}
 
-	// Open log file
-	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	// Open log file (logs may contain previews of sensitive matches: owner-only).
+	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
 	if err != nil {
 		return err
 	}
+	// Tighten permissions on pre-existing log files too (mode only applies on creation).
+	_ = os.Chmod(logPath, 0600)
 
 	// Parse log level
 	var slogLevel slog.Level
@@ -52,10 +54,12 @@ func Setup(logPath string, level string) error {
 func SetFileOnly(logPath string, level string) error {
 	logPath = ExpandPath(logPath)
 
-	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
 	if err != nil {
 		return err
 	}
+	// Tighten permissions on pre-existing log files too (mode only applies on creation).
+	_ = os.Chmod(logPath, 0600)
 
 	var slogLevel slog.Level
 	switch level {

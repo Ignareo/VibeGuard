@@ -81,7 +81,7 @@ func (a *Admin) RecordAudit(ev AuditEvent) AuditEvent {
 
 	// Optional: persist to disk (full build + enabled in config).
 	if a.auditDB != nil {
-		if _, err := a.auditDB.Add(adminToDBEvent(saved)); err != nil {
+		if _, err := a.auditDB.Add(adminToDBEvent(saved, a.persistRawAuditValues())); err != nil {
 			slog.Warn("auditdb: write failed", "error", err)
 		}
 	}
@@ -103,7 +103,7 @@ func (a *Admin) UpdateAudit(id int64, fn func(*AuditEvent)) (AuditEvent, bool) {
 			dbEv.RestoredCount = ev.RestoredCount
 			dbEv.Attempted = ev.Attempted
 			dbEv.RedactedCount = ev.RedactedCount
-			dbEv.Matches = append([]auditdb.AuditMatch(nil), adminToDBMatches(ev.Matches)...)
+			dbEv.Matches = append([]auditdb.AuditMatch(nil), adminToDBMatches(ev.Matches, a.persistRawAuditValues())...)
 			dbEv.Note = ev.Note
 		})
 	}
@@ -186,7 +186,17 @@ func parseDuration(s string, fallback time.Duration) time.Duration {
 	return fallback
 }
 
-func adminToDBEvent(ev AuditEvent) auditdb.AuditEvent {
+// persistRawAuditValues reports whether raw matched values may be persisted to the audit
+// DB. Default false: the DB only stores previews, even when the admin UI is allowed to
+// display originals (log.redact_log=false).
+func (a *Admin) persistRawAuditValues() bool {
+	if a == nil || a.config == nil {
+		return false
+	}
+	return a.config.Get().AuditDB.PersistRawValues
+}
+
+func adminToDBEvent(ev AuditEvent, persistRaw bool) auditdb.AuditEvent {
 	return auditdb.AuditEvent{
 		ID:                  ev.ID,
 		Time:                ev.Time,
@@ -197,7 +207,7 @@ func adminToDBEvent(ev AuditEvent) auditdb.AuditEvent {
 		ContentEncoding:     ev.ContentEncoding,
 		Attempted:           ev.Attempted,
 		RedactedCount:       ev.RedactedCount,
-		Matches:             append([]auditdb.AuditMatch(nil), adminToDBMatches(ev.Matches)...),
+		Matches:             append([]auditdb.AuditMatch(nil), adminToDBMatches(ev.Matches, persistRaw)...),
 		Note:                ev.Note,
 		ResponseStatus:      ev.ResponseStatus,
 		ResponseContentType: ev.ResponseContentType,
@@ -206,20 +216,38 @@ func adminToDBEvent(ev AuditEvent) auditdb.AuditEvent {
 	}
 }
 
-func adminToDBMatches(in []AuditMatch) []auditdb.AuditMatch {
+func adminToDBMatches(in []AuditMatch, persistRaw bool) []auditdb.AuditMatch {
 	if len(in) == 0 {
 		return nil
 	}
 	out := make([]auditdb.AuditMatch, len(in))
 	for i := range in {
+		value := in[i].Value
+		isPreview := in[i].IsPreview
+		if !persistRaw && !isPreview {
+			// Never persist raw sensitive values by default; degrade to a preview.
+			value = previewAuditValue(value)
+			isPreview = true
+		}
 		out[i] = auditdb.AuditMatch{
 			Category:    in[i].Category,
 			Placeholder: in[i].Placeholder,
-			Value:       in[i].Value,
-			IsPreview:   in[i].IsPreview,
+			Value:       value,
+			IsPreview:   isPreview,
 			Length:      in[i].Length,
 			Truncated:   in[i].Truncated,
 		}
 	}
 	return out
+}
+
+// previewAuditValue masks a value for at-rest persistence (first2…last2), mirroring the
+// UI preview format used in privacy mode.
+func previewAuditValue(s string) string {
+	r := []rune(s)
+	n := len(r)
+	if n <= 4 {
+		return strings.Repeat("*", n)
+	}
+	return string(r[:2]) + "…" + string(r[n-2:])
 }
