@@ -90,8 +90,10 @@ func (m *Manager) register(placeholder, original string, createdAt time.Time, ap
 	m.reverse[original] = placeholder
 	m.created[placeholder] = createdAt
 	wal := m.wal
-	m.mu.Unlock()
 
+	// Keep the WAL append inside the m.mu critical section: compactWALIfOversized
+	// snapshots m.forward and rewrites the WAL under the same lock, so an append can
+	// never land in the old file after the snapshot and be lost to the rename.
 	if appendToWAL && wal != nil {
 		if err := wal.Append(WALEntry{
 			Placeholder: placeholder,
@@ -101,6 +103,7 @@ func (m *Manager) register(placeholder, original string, createdAt time.Time, ap
 			slog.Warn("Failed to append session mapping to WAL", "error", err)
 		}
 	}
+	m.mu.Unlock()
 }
 
 // Lookup returns the original value for a placeholder
@@ -263,8 +266,9 @@ func (m *Manager) GetOrCreatePlaceholder(original, category, prefix string) stri
 	m.reverse[original] = placeholder
 	m.created[placeholder] = createdAt
 	wal := m.wal
-	m.mu.Unlock()
 
+	// See register(): the WAL append stays inside the m.mu critical section so WAL
+	// compaction cannot lose concurrently registered mappings.
 	if wal != nil {
 		if err := wal.Append(WALEntry{
 			Placeholder: placeholder,
@@ -274,6 +278,7 @@ func (m *Manager) GetOrCreatePlaceholder(original, category, prefix string) stri
 			slog.Warn("Failed to append session mapping to WAL", "error", err)
 		}
 	}
+	m.mu.Unlock()
 	return placeholder
 }
 
@@ -392,7 +397,11 @@ func (m *Manager) compactWALIfOversized() {
 		return
 	}
 
-	m.mu.RLock()
+	// Hold the write lock across the snapshot AND the rewrite: register/
+	// GetOrCreatePlaceholder append to the WAL while holding m.mu, so this makes
+	// snapshot+Compact atomic against concurrent appends (an append either lands in
+	// the snapshot or in the new file after the rename).
+	m.mu.Lock()
 	entries := make([]WALEntry, 0, len(m.forward))
 	for placeholder, original := range m.forward {
 		entries = append(entries, WALEntry{
@@ -401,10 +410,11 @@ func (m *Manager) compactWALIfOversized() {
 			CreatedAt:   m.created[placeholder],
 		})
 	}
-	m.mu.RUnlock()
+	compactErr := wal.Compact(entries)
+	m.mu.Unlock()
 
-	if err := wal.Compact(entries); err != nil {
-		slog.Warn("Failed to compact session WAL", "error", err)
+	if compactErr != nil {
+		slog.Warn("Failed to compact session WAL", "error", compactErr)
 		return
 	}
 	slog.Info("Compacted session WAL", "old_bytes", size, "live_entries", len(entries))
