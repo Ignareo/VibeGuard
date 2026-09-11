@@ -120,7 +120,7 @@ func (a *Admin) updateSettings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := a.config.Update(func(c *config.Config) {
+	if err := a.updateConfig(r, "config.settings.update", func(c *config.Config) {
 		c.Proxy.WebSocketRedactionBeta = *req.Proxy.WebSocketRedactionBeta
 	}); err != nil {
 		http.Error(w, "Failed to update config", http.StatusInternalServerError)

@@ -106,6 +106,7 @@ func (a *Admin) handleCertRegenerate(w http.ResponseWriter, r *http.Request) {
 
 	// Update reference
 	a.ca = newCA
+	a.metaRecord(r, "cert.regenerate")
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{

@@ -67,6 +67,7 @@ func (a *Admin) clearAudit(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	a.audit.Clear()
+	a.metaRecord(r, "audit.clear")
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -94,7 +95,7 @@ func (a *Admin) handleAuditPrivacy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := a.config.Update(func(c *config.Config) {
+	if err := a.updateConfig(r, "config.audit_privacy.update", func(c *config.Config) {
 		c.Log.RedactLog = *req.RedactLog
 	}); err != nil {
 		http.Error(w, "Failed to save: "+err.Error(), http.StatusInternalServerError)
@@ -160,7 +161,7 @@ func (a *Admin) handleAuditPersistence(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := a.config.Update(func(c *config.Config) {
+	if err := a.updateConfig(r, "config.audit_persistence.update", func(c *config.Config) {
 		c.AuditDB.Enabled = *req.Enabled
 		if req.Retention != nil {
 			c.AuditDB.Retention = strings.TrimSpace(*req.Retention)

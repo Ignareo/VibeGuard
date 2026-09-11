@@ -100,7 +100,7 @@ func (a *Admin) updateSessionsSettings(w http.ResponseWriter, r *http.Request) {
 		key32 = k
 	}
 
-	if err := a.config.Update(func(c *config.Config) {
+	if err := a.updateConfig(r, "config.session.update", func(c *config.Config) {
 		c.Session.DeterministicPlaceholders = enabled
 	}); err != nil {
 		http.Error(w, "Failed to update config", http.StatusInternalServerError)
@@ -121,6 +121,7 @@ func (a *Admin) updateSessionsSettings(w http.ResponseWriter, r *http.Request) {
 
 func (a *Admin) clearSessions(w http.ResponseWriter, r *http.Request) {
 	a.session.Clear()
+	a.metaRecord(r, "session.clear")
 	w.WriteHeader(http.StatusNoContent)
 }
 

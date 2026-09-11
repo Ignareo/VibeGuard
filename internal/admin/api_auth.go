@@ -2,9 +2,13 @@ package admin
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strings"
+	"time"
 )
+
+const loginMaxFailures = 5
 
 type AuthStatusResponse struct {
 	Configured    bool   `json:"configured"`
@@ -61,6 +65,7 @@ func (a *Admin) handleAuthSetup(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	a.metaRecord(r, "auth.setup")
 
 	// Create a session immediately after setup to avoid requiring a separate manual login.
 	a.auth.mu.Lock()
@@ -97,10 +102,41 @@ func (a *Admin) handleAuthLogin(w http.ResponseWriter, r *http.Request) {
 	}
 	req.Password = strings.TrimSpace(req.Password)
 
+	// Brute-force protection: consecutive failures lock login attempts temporarily
+	// (1 minute, doubling per extra failure, capped at ~16 minutes).
+	a.loginMu.Lock()
+	if until := a.loginLockedUntil; time.Now().Before(until) {
+		a.loginMu.Unlock()
+		a.metaRecord(r, "auth.login.locked", "retry_after_sec", int(time.Until(until).Seconds())+1)
+		w.Header().Set("Retry-After", fmt.Sprintf("%d", int(time.Until(until).Seconds())+1))
+		http.Error(w, "Too many failed attempts; try again later", http.StatusTooManyRequests)
+		return
+	}
+	a.loginMu.Unlock()
+
 	if err := a.auth.Verify(req.Password); err != nil {
+		a.loginMu.Lock()
+		a.loginFailures++
+		failures := a.loginFailures
+		if failures >= loginMaxFailures {
+			shift := failures - loginMaxFailures
+			if shift > 4 {
+				shift = 4
+			}
+			a.loginLockedUntil = time.Now().Add(time.Minute << shift)
+		}
+		locked := !a.loginLockedUntil.IsZero() && time.Now().Before(a.loginLockedUntil)
+		a.loginMu.Unlock()
+		a.metaRecord(r, "auth.login.failure", "failures", failures, "locked", locked)
 		http.Error(w, "Invalid password", http.StatusUnauthorized)
 		return
 	}
+
+	a.loginMu.Lock()
+	a.loginFailures = 0
+	a.loginLockedUntil = time.Time{}
+	a.loginMu.Unlock()
+	a.metaRecord(r, "auth.login.success")
 
 	a.auth.mu.Lock()
 	token, _, err := a.auth.CreateSessionLocked()
@@ -129,6 +165,7 @@ func (a *Admin) handleAuthLogout(w http.ResponseWriter, r *http.Request) {
 
 	a.auth.DestroySession(r)
 	clearAdminSessionCookie(w)
+	a.metaRecord(r, "auth.logout")
 
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")

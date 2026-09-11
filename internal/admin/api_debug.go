@@ -66,6 +66,7 @@ func (a *Admin) handleDebugEvents(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(resp)
 	case http.MethodDelete:
 		a.debug.Clear()
+		a.metaRecord(r, "debug.clear")
 		w.WriteHeader(http.StatusNoContent)
 	default:
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)

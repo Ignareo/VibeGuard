@@ -2,7 +2,9 @@ package admin
 
 import (
 	"log/slog"
+	"net/http"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -35,6 +37,12 @@ type Admin struct {
 	stopPurge func()
 	debug    *DebugStore
 	auth     *AuthManager
+	meta     *metaAuditLog
+
+	// Login brute-force protection: consecutive failures trigger a temporary lockout.
+	loginMu          sync.Mutex
+	loginFailures    int
+	loginLockedUntil time.Time
 }
 
 // New creates a new Admin handler
@@ -50,6 +58,7 @@ func New(cfg *config.Manager, sess *session.Manager, ca *cert.CA, certPath, keyP
 		audit:    NewAuditStore(200),
 		debug:    NewDebugStore(50),
 		auth:     auth,
+		meta:     newMetaAuditLog(),
 	}
 	a.started.Store(0)
 
@@ -194,6 +203,16 @@ func (a *Admin) persistRawAuditValues() bool {
 		return false
 	}
 	return a.config.Get().AuditDB.PersistRawValues
+}
+
+// updateConfig applies fn to the config and persists it, recording a meta-audit entry on
+// success so rule/config changes stay traceable.
+func (a *Admin) updateConfig(r *http.Request, action string, fn func(*config.Config)) error {
+	err := a.config.Update(fn)
+	if err == nil {
+		a.metaRecord(r, action)
+	}
+	return err
 }
 
 func adminToDBEvent(ev AuditEvent, persistRaw bool) auditdb.AuditEvent {

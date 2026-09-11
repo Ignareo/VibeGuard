@@ -117,7 +117,7 @@ func (a *Admin) updateNERSettings(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	if err := a.config.Update(func(c *config.Config) {
+	if err := a.updateConfig(r, "config.ner.update", func(c *config.Config) {
 		if req.Enabled != nil {
 			c.Patterns.NER.Enabled = *req.Enabled
 		}

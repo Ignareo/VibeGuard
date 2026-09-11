@@ -133,7 +133,7 @@ func (a *Admin) handleRuleListsSubscribe(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	if err := a.config.Update(func(c *config.Config) {
+	if err := a.updateConfig(r, "config.rule_lists.subscribe", func(c *config.Config) {
 		c.Patterns.RuleLists = append(c.Patterns.RuleLists, rl)
 	}); err != nil {
 		// Config save failed: best-effort cleanup to avoid orphaned cache files.
@@ -245,7 +245,7 @@ func (a *Admin) handleRuleListsUpload(w http.ResponseWriter, r *http.Request) {
 	}
 
 	tildePath := filepath.ToSlash(filepath.Join("~", ".vibeguard", "rules", "local", filename))
-	if err := a.config.Update(func(c *config.Config) {
+	if err := a.updateConfig(r, "config.rule_lists.upload", func(c *config.Config) {
 		c.Patterns.RuleLists = append(c.Patterns.RuleLists, config.RuleListConfig{
 			ID:       id,
 			Name:     displayName,
@@ -291,7 +291,7 @@ func (a *Admin) handleRuleListsItem(w http.ResponseWriter, r *http.Request) {
 
 	// Remove from config first; also best-effort delete admin-managed local files (only within managed directory).
 	var removed config.RuleListConfig
-	if err := a.config.Update(func(c *config.Config) {
+	if err := a.updateConfig(r, "config.rule_lists.delete", func(c *config.Config) {
 		out := c.Patterns.RuleLists[:0]
 		for _, rl := range c.Patterns.RuleLists {
 			key := strings.TrimSpace(rl.ID)
@@ -402,7 +402,7 @@ func (a *Admin) updateRuleList(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	if err := a.config.Update(func(c *config.Config) {
+	if err := a.updateConfig(r, "config.rule_lists.update", func(c *config.Config) {
 		for i := range c.Patterns.RuleLists {
 			rl := &c.Patterns.RuleLists[i]
 			key := strings.TrimSpace(rl.ID)

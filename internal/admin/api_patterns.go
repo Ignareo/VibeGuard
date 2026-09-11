@@ -50,7 +50,7 @@ func (a *Admin) handlePatternsItem(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := a.config.Update(func(c *config.Config) {
+	if err := a.updateConfig(r, "config.patterns.delete", func(c *config.Config) {
 		switch patternType {
 		case "keywords":
 			if index >= 0 && index < len(c.Patterns.Keywords) {
@@ -199,7 +199,7 @@ func (a *Admin) addPattern(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := a.config.Update(func(c *config.Config) {
+	if err := a.updateConfig(r, "config.patterns.add", func(c *config.Config) {
 		switch req.Type {
 		case "keyword":
 			// Strip invisible characters to avoid "looks added but doesn't match" surprises.
