@@ -164,7 +164,14 @@ type AuditDBConfig struct {
 	// PersistRawValues controls whether raw matched values may be written to the audit DB.
 	// Default false: only previews (first2…last2) are persisted, even when the admin UI is
 	// allowed to display originals (log.redact_log=false).
-	PersistRawValues bool `yaml:"persist_raw_values"`
+	// Pointer so a project-level config can explicitly disable it (a plain bool cannot
+	// distinguish "unset" from "false", which would make the flag one-way-on).
+	PersistRawValues *bool `yaml:"persist_raw_values"`
+}
+
+// PersistRawValuesEnabled reports whether raw matched values may be persisted to the audit DB.
+func (c AuditDBConfig) PersistRawValuesEnabled() bool {
+	return c.PersistRawValues != nil && *c.PersistRawValues
 }
 
 // DefaultRuleListURL is the default rule-list subscription, served from this fork
@@ -235,10 +242,9 @@ var defaultConfig = Config{
 		RedactLog: true,
 	},
 	AuditDB: AuditDBConfig{
-		Enabled:          false,
-		Path:             "~/.vibeguard/audit.db",
-		Retention:        "7d",
-		PersistRawValues: false,
+		Enabled:   false,
+		Path:      "~/.vibeguard/audit.db",
+		Retention: "7d",
 	},
 }
 
@@ -435,7 +441,7 @@ func sanitizeLoadedConfig(cfg *Config) {
 	cfg.Proxy.PlaceholderPrefix = strings.TrimSpace(cfg.Proxy.PlaceholderPrefix)
 	cfg.Proxy.InterceptMode = strings.TrimSpace(cfg.Proxy.InterceptMode)
 	cfg.Proxy.InvalidJSONPolicy = strings.ToLower(strings.TrimSpace(cfg.Proxy.InvalidJSONPolicy))
-	if cfg.Proxy.InvalidJSONPolicy != "partial" && cfg.Proxy.InvalidJSONPolicy != "block" {
+	if cfg.Proxy.InvalidJSONPolicy != "partial" && cfg.Proxy.InvalidJSONPolicy != "block" && cfg.Proxy.InvalidJSONPolicy != "allow" {
 		cfg.Proxy.InvalidJSONPolicy = defaultConfig.Proxy.InvalidJSONPolicy
 	}
 
@@ -877,7 +883,8 @@ func mergeConfigs(global, project Config) Config {
 		result.Log.File = project.Log.File
 	}
 
-	// AuditDB: project-level can enable/override path/retention.
+	// AuditDB: project-level can enable/override path/retention; persist_raw_values
+	// is a pointer so a project config can also force it back off.
 	if project.AuditDB.Enabled {
 		result.AuditDB.Enabled = true
 	}
@@ -887,8 +894,8 @@ func mergeConfigs(global, project Config) Config {
 	if strings.TrimSpace(project.AuditDB.Retention) != "" {
 		result.AuditDB.Retention = project.AuditDB.Retention
 	}
-	if project.AuditDB.PersistRawValues {
-		result.AuditDB.PersistRawValues = true
+	if project.AuditDB.PersistRawValues != nil {
+		result.AuditDB.PersistRawValues = project.AuditDB.PersistRawValues
 	}
 
 	return result

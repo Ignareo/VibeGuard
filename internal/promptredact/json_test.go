@@ -184,3 +184,89 @@ func TestRedactJSONBodyNoSecrets(t *testing.T) {
 		t.Fatalf("body modified: %s", out)
 	}
 }
+
+func TestRedactJSONBodyAnthropicThinkingBlock(t *testing.T) {
+	body := `{"messages":[{"role":"assistant","content":[
+		{"type":"thinking","thinking":"the key is ` + testSecret + `","signature":"abc123"},
+		{"type":"text","text":"ok"}]}]}`
+	out, _, changed, err := RedactJSONBody(newTestEngine(t), []byte(body))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !changed {
+		t.Fatal("expected thinking block to be redacted")
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal(out, &decoded); err != nil {
+		t.Fatalf("output not valid JSON: %v", err)
+	}
+	if strings.Contains(string(out), testSecret) {
+		t.Fatalf("secret still present: %s", out)
+	}
+	if !strings.Contains(string(out), `"signature":"abc123"`) {
+		t.Fatalf("signature must be preserved: %s", out)
+	}
+}
+
+func TestRedactJSONBodyLegacyFunctionCall(t *testing.T) {
+	body := `{"messages":[{"role":"assistant","function_call":{"name":"deploy","arguments":"{\"token\":\"` + testSecret + `\"}"}}]}`
+	out, matches, changed, err := RedactJSONBody(newTestEngine(t), []byte(body))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	assertRedacted(t, body, out, changed, matches)
+	if !strings.Contains(string(out), `"name":"deploy"`) {
+		t.Fatalf("function name must be preserved: %s", out)
+	}
+}
+
+func TestRedactJSONBodyReasoningSummary(t *testing.T) {
+	body := `{"input":[
+		{"type":"reasoning","summary":[{"type":"summary_text","text":"used key ` + testSecret + `"}]},
+		{"type":"message","content":[{"type":"output_text","text":"done"}]}]}`
+	out, matches, changed, err := RedactJSONBody(newTestEngine(t), []byte(body))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	assertRedacted(t, body, out, changed, matches)
+}
+
+func TestRedactJSONBodyNonStringArguments(t *testing.T) {
+	// Some clients send function_call arguments already parsed (object, not string).
+	body := `{"input":[{"type":"function_call","name":"deploy","arguments":{"token":"` + testSecret + `"}}]}`
+	out, matches, changed, err := RedactJSONBody(newTestEngine(t), []byte(body))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	assertRedacted(t, body, out, changed, matches)
+	if !strings.Contains(string(out), `"name":"deploy"`) {
+		t.Fatalf("function name must be preserved: %s", out)
+	}
+}
+
+func TestRedactJSONBodyDocumentSource(t *testing.T) {
+	body := `{"messages":[{"role":"user","content":[
+		{"type":"document","source":{"type":"text","media_type":"text/plain","data":"key: ` + testSecret + `"}},
+		{"type":"document","source":{"type":"base64","media_type":"application/pdf","data":"` + testSecret + `"}}]}]}`
+	out, _, changed, err := RedactJSONBody(newTestEngine(t), []byte(body))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !changed {
+		t.Fatal("expected text document source to be redacted")
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal(out, &decoded); err != nil {
+		t.Fatalf("output not valid JSON: %v", err)
+	}
+	content := decoded["messages"].([]any)[0].(map[string]any)["content"].([]any)
+	textDoc := content[0].(map[string]any)["source"].(map[string]any)
+	if strings.Contains(textDoc["data"].(string), testSecret) {
+		t.Fatalf("text document source not redacted: %s", out)
+	}
+	// base64 sources must pass through untouched.
+	b64Doc := content[1].(map[string]any)["source"].(map[string]any)
+	if b64Doc["data"].(string) != testSecret {
+		t.Fatalf("base64 document source must be preserved: %s", out)
+	}
+}

@@ -1025,7 +1025,8 @@ func runInit(cmd *cobra.Command, args []string) error {
 	  # HTTPS intercept mode: global (default, intercept all) or targets (only intercept targets below)
 	  intercept_mode: global
 	  # Fallback policy when redaction would corrupt a JSON body: partial (default; drop only
-	  # JSON-breaking matches and forward the rest redacted) or block (reject the request)
+	  # JSON-breaking matches and forward the rest redacted), block (reject the request),
+	  # or allow (forward the original body unredacted)
 	  invalid_json_policy: partial
 
 session:
@@ -1090,7 +1091,8 @@ proxy:
   # HTTPS intercept mode: global (default, intercept all) or targets (only intercept targets below)
   intercept_mode: global
   # Fallback policy when redaction would corrupt a JSON body: partial (default; drop only
-  # JSON-breaking matches and forward the rest redacted) or block (reject the request)
+  # JSON-breaking matches and forward the rest redacted), block (reject the request),
+  # or allow (forward the original body unredacted)
   invalid_json_policy: partial
 
 session:

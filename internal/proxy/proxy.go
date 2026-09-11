@@ -50,6 +50,7 @@ const (
 
 	invalidJSONPolicyPartial = "partial"
 	invalidJSONPolicyBlock   = "block"
+	invalidJSONPolicyAllow   = "allow"
 )
 
 var errUnsupportedContentEncoding = errors.New("unsupported content-encoding")
@@ -633,6 +634,9 @@ func (s *Server) setupHandlers() {
 				redacted []byte
 				matches  []redact.Match
 			)
+			// NER failures are counted globally; attribute them to this request's audit
+			// event via a before/after delta (best-effort under concurrency).
+			nerFailuresBefore := stats.NERFailures.Load()
 			if multipart {
 				// multipart/form-data: redact only the text parts (form fields and text files),
 				// binary parts are forwarded untouched and the boundary is preserved.
@@ -649,14 +653,15 @@ func (s *Server) setupHandlers() {
 				}
 				redacted = out
 				matches = ms
-			} else if strings.Contains(contentType, "application/json") {
+			} else if isJSONContentType(contentType) {
 				if out, ms, changed, jerr := promptredact.RedactJSONBody(rt.redactEng, body); jerr == nil && changed {
 					redacted = out
 					matches = ms
-				} else if jerr == nil && !changed {
-					redacted = body
-					matches = nil
 				} else {
+					// Structured pass errored or found nothing in known prompt fields:
+					// fall back to whole-text redaction so fields the structured walker
+					// does not cover (unknown/new API shapes) are still redacted. JSON
+					// breakage is handled below per proxy.invalid_json_policy.
 					redacted, matches = rt.redactEng.RedactWithMatches(body)
 				}
 			} else {
@@ -670,30 +675,40 @@ func (s *Server) setupHandlers() {
 				usedRedacted = true
 			}
 			// Safety fallback: if whole-text redaction broke a previously valid JSON body,
-			// do NOT revert to the original body (that would forward every detected secret
-			// in clear). Retry at match granularity, dropping only the matches whose
-			// replacement invalidates the JSON structure.
-			if usedRedacted && strings.Contains(contentType, "application/json") && json.Valid(body) && !json.Valid(outBody) {
-				fixed, applied, dropped := reapplyMatchesPreservingJSON(body, matches)
-				slog.Warn("Whole-text redaction corrupted JSON request body; dropped JSON-breaking matches instead of forwarding the original body",
-					"host", host, "applied", len(applied), "dropped", len(dropped), "dropped_categories", matchCategories(dropped))
-				outBody = fixed
-				matches = applied
-				usedRedacted = len(applied) > 0
-				auditEv.Note = "invalid_json_partial"
+			// do NOT silently revert to the original body (that would forward every
+			// detected secret in clear) unless proxy.invalid_json_policy=allow.
+			// Default (partial): retry at match granularity, dropping only the matches
+			// whose replacement invalidates the JSON structure.
+			if usedRedacted && isJSONContentType(contentType) && json.Valid(body) && !json.Valid(outBody) {
+				if rt.invalidJSONPolicy == invalidJSONPolicyAllow {
+					slog.Warn("Whole-text redaction corrupted JSON request body; forwarding original body per proxy.invalid_json_policy=allow",
+						"host", host, "matches", len(matches), "categories", matchCategories(matches))
+					outBody = body
+					matches = nil
+					usedRedacted = false
+					auditEv.Note = "invalid_json_allow"
+				} else {
+					fixed, applied, dropped := reapplyMatchesPreservingJSON(body, matches)
+					slog.Warn("Whole-text redaction corrupted JSON request body; dropped JSON-breaking matches instead of forwarding the original body",
+						"host", host, "applied", len(applied), "dropped", len(dropped), "dropped_categories", matchCategories(dropped))
+					outBody = fixed
+					matches = applied
+					usedRedacted = len(applied) > 0
+					auditEv.Note = "invalid_json_partial"
 
-				if len(dropped) > 0 && rt.invalidJSONPolicy == invalidJSONPolicyBlock {
-					auditEv.RedactedCount = len(applied)
-					if len(applied) > 0 {
-						auditEv.Matches = buildAuditMatches(s.config.Get().Log.RedactLog, applied)
+					if len(dropped) > 0 && rt.invalidJSONPolicy == invalidJSONPolicyBlock {
+						auditEv.RedactedCount = len(applied)
+						if len(applied) > 0 {
+							auditEv.Matches = buildAuditMatches(s.config.Get().Log.RedactLog, applied)
+						}
+						auditEv.Note = "invalid_json_blocked"
+						recordAudit()
+						stats.Errors.Add(1)
+						slog.Warn("Blocked request: redaction would corrupt JSON and proxy.invalid_json_policy=block",
+							"host", host, "dropped", len(dropped), "dropped_categories", matchCategories(dropped))
+						return req, goproxy.NewResponse(req, goproxy.ContentTypeText, http.StatusBadGateway,
+							"VibeGuard blocked this request: redacting detected sensitive data would corrupt the JSON body (proxy.invalid_json_policy=block).\n")
 					}
-					auditEv.Note = "invalid_json_blocked"
-					recordAudit()
-					stats.Errors.Add(1)
-					slog.Warn("Blocked request: redaction would corrupt JSON and proxy.invalid_json_policy=block",
-						"host", host, "dropped", len(dropped), "dropped_categories", matchCategories(dropped))
-					return req, goproxy.NewResponse(req, goproxy.ContentTypeText, http.StatusBadGateway,
-						"VibeGuard blocked this request: redacting detected sensitive data would corrupt the JSON body (proxy.invalid_json_policy=block).\n")
 				}
 			}
 
@@ -701,6 +716,9 @@ func (s *Server) setupHandlers() {
 			auditEv.RedactedCount = count
 			if count > 0 {
 				auditEv.Matches = buildAuditMatches(s.config.Get().Log.RedactLog, matches)
+			}
+			if stats.NERFailures.Load() != nerFailuresBefore {
+				auditEv.Note = appendAuditNote(auditEv.Note, "ner_failure")
 			}
 
 			recordAudit()
@@ -1422,8 +1440,11 @@ func (s *Server) applyConfig(c config.Config) {
 	}
 
 	invalidJSONPolicy := invalidJSONPolicyPartial
-	if strings.ToLower(strings.TrimSpace(c.Proxy.InvalidJSONPolicy)) == invalidJSONPolicyBlock {
+	switch strings.ToLower(strings.TrimSpace(c.Proxy.InvalidJSONPolicy)) {
+	case invalidJSONPolicyBlock:
 		invalidJSONPolicy = invalidJSONPolicyBlock
+	case invalidJSONPolicyAllow:
+		invalidJSONPolicy = invalidJSONPolicyAllow
 	}
 
 	s.runtime.Store(runtimeConfig{

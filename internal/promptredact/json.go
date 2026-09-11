@@ -167,14 +167,19 @@ func redactJSONSystemLike(redactEng redact.Redactor, v any) (out any, matches []
 	}
 }
 
-// redactJSONToolPayloadString redacts tool call payloads carried as strings
-// (OpenAI tool_calls[].function.arguments, Responses function_call.output). The payload
-// is usually a JSON-encoded string: prefer structured redaction of the parsed payload so
-// escaped secrets are caught; fall back to plain-text redaction when it is not JSON.
+// redactJSONToolPayloadString redacts tool call payloads. String payloads are usually
+// JSON-encoded: prefer structured redaction of the parsed payload so escaped secrets are
+// caught; fall back to plain-text redaction when it is not JSON. Non-string payloads
+// (some clients send arguments/output already parsed) are redacted as structured data.
 func redactJSONToolPayloadString(redactEng redact.Redactor, v any) (out any, matches []redact.Match, changed bool, err error) {
 	s, ok := v.(string)
 	if !ok {
-		return v, nil, false, nil
+		switch v.(type) {
+		case map[string]any, []any:
+			return redactJSONDeepStrings(redactEng, v)
+		default:
+			return v, nil, false, nil
+		}
 	}
 
 	var parsed any
@@ -363,6 +368,39 @@ func redactJSONMessageItem(redactEng redact.Redactor, v any) (out any, matches [
 			}
 		}
 
+		// Legacy chat.completions function_call on assistant messages
+		// ({name, arguments}); the name is left untouched for call pairing.
+		if fc, ok := vv["function_call"].(map[string]any); ok {
+			if a, ok := fc["arguments"]; ok {
+				na, ms, ch, err := redactJSONToolPayloadString(redactEng, a)
+				if err != nil {
+					return v, nil, false, err
+				}
+				if ch {
+					fc["arguments"] = na
+					anyChanged = true
+				}
+				if len(ms) > 0 {
+					all = append(all, ms...)
+				}
+			}
+		}
+
+		// Responses reasoning items carry a summary array of {type, text} parts.
+		if sm, ok := vv["summary"]; ok {
+			ns, ms, ch, err := redactJSONTextParts(redactEng, sm)
+			if err != nil {
+				return v, nil, false, err
+			}
+			if ch {
+				vv["summary"] = ns
+				anyChanged = true
+			}
+			if len(ms) > 0 {
+				all = append(all, ms...)
+			}
+		}
+
 		// Responses API function_call_output items carry the tool result as a string.
 		if o, ok := vv["output"]; ok {
 			no, ms, ch, err := redactJSONToolPayloadString(redactEng, o)
@@ -444,6 +482,42 @@ func redactJSONTextPart(redactEng redact.Redactor, v any) (out any, matches []re
 			}
 			if len(ms) > 0 {
 				all = append(all, ms...)
+			}
+		}
+
+		// Anthropic thinking blocks: {"type":"thinking","thinking":"...",...}.
+		// The cryptographic "signature" field is never touched.
+		if tk, ok := vv["thinking"]; ok {
+			nt, ms, ch, err := redactJSONStringLike(redactEng, tk)
+			if err != nil {
+				return v, nil, false, err
+			}
+			if ch {
+				vv["thinking"] = nt
+				anyChanged = true
+			}
+			if len(ms) > 0 {
+				all = append(all, ms...)
+			}
+		}
+
+		// Anthropic document blocks carry their payload in source.data. Only plain-text
+		// sources are redacted; base64 sources (PDF/images) are forwarded untouched.
+		if src, ok := vv["source"].(map[string]any); ok {
+			if st, _ := src["type"].(string); st == "text" {
+				if d, ok := src["data"]; ok {
+					nd, ms, ch, err := redactJSONStringLike(redactEng, d)
+					if err != nil {
+						return v, nil, false, err
+					}
+					if ch {
+						src["data"] = nd
+						anyChanged = true
+					}
+					if len(ms) > 0 {
+						all = append(all, ms...)
+					}
+				}
 			}
 		}
 
