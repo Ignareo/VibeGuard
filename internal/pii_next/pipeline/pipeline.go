@@ -154,11 +154,9 @@ func (p *Pipeline) RedactWithMatches(input []byte) ([]byte, []redact.Match) {
 		}
 		original := string(input[m.Start:m.End])
 
-		placeholder, ok := p.sess.LookupReverse(original)
-		if !ok {
-			placeholder = p.sess.GeneratePlaceholder(original, m.Category, p.prefix)
-			p.sess.Register(placeholder, original)
-		}
+		// Reuse existing mapping or register a new one atomically (important for WAL
+		// restore across restarts, and race-free under concurrent requests).
+		placeholder := p.sess.GetOrCreatePlaceholder(original, m.Category, p.prefix)
 
 		outMatches = append(outMatches, redact.Match{
 			Start:       m.Start,

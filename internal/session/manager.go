@@ -147,6 +147,62 @@ func (m *Manager) GeneratePlaceholder(original, category, prefix string) string 
 	return placeholder
 }
 
+// GetOrCreatePlaceholder returns the existing placeholder for original, or generates,
+// registers, and WAL-appends a new one — all under a single write-lock critical section,
+// eliminating the TOCTOU race of LookupReverse → GeneratePlaceholder → Register.
+func (m *Manager) GetOrCreatePlaceholder(original, category, prefix string) string {
+	m.mu.RLock()
+	if ph, ok := m.reverse[original]; ok {
+		m.mu.RUnlock()
+		return ph
+	}
+	m.mu.RUnlock()
+
+	key := m.placeholderKey()
+	h := hmac.New(sha256.New, key)
+	_, _ = h.Write([]byte(original))
+	hash12 := hex.EncodeToString(h.Sum(nil))[:12]
+	base := fmt.Sprintf("%s%s_%s__", prefix, category, hash12)
+
+	createdAt := time.Now()
+
+	m.mu.Lock()
+	// Re-check under the write lock: another goroutine may have registered meanwhile.
+	if ph, ok := m.reverse[original]; ok {
+		m.mu.Unlock()
+		return ph
+	}
+	placeholder := base
+	if existing, exists := m.forward[placeholder]; exists && existing != original {
+		for i := 2; ; i++ {
+			ph := fmt.Sprintf("%s%s_%s_%d__", prefix, category, hash12, i)
+			if e, ok := m.forward[ph]; !ok || e == original {
+				placeholder = ph
+				break
+			}
+		}
+	}
+	if len(m.forward) >= m.maxSize {
+		m.evictOldestLocked()
+	}
+	m.forward[placeholder] = original
+	m.reverse[original] = placeholder
+	m.created[placeholder] = createdAt
+	wal := m.wal
+	m.mu.Unlock()
+
+	if wal != nil {
+		if err := wal.Append(WALEntry{
+			Placeholder: placeholder,
+			Original:    original,
+			CreatedAt:   createdAt,
+		}); err != nil {
+			slog.Warn("Failed to append session mapping to WAL", "error", err)
+		}
+	}
+	return placeholder
+}
+
 func (m *Manager) placeholderKey() []byte {
 	m.mu.RLock()
 	useDet := m.deterministicOn && len(m.deterministicSecret) == 32

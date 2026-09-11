@@ -274,13 +274,9 @@ func (e *Engine) RedactWithMatches(input []byte) ([]byte, []Match) {
 		if m.Start < cursor || m.Start < 0 || m.End > len(input) || m.Start >= m.End {
 			continue
 		}
-		// Reuse existing mapping first (important for WAL restore across restarts),
-		// otherwise generate and register a new placeholder.
-		placeholder, ok := e.session.LookupReverse(m.Original)
-		if !ok {
-			placeholder = e.session.GeneratePlaceholder(m.Original, m.Category, e.prefix)
-			e.session.Register(placeholder, m.Original)
-		}
+		// Reuse existing mapping or register a new one atomically (important for WAL
+		// restore across restarts, and race-free under concurrent requests).
+		placeholder := e.session.GetOrCreatePlaceholder(m.Original, m.Category, e.prefix)
 
 		m.Placeholder = placeholder
 
