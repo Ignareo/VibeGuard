@@ -10,6 +10,8 @@
   English | <a href="README.zh-CN.md">中文</a>
 </p>
 
+> **Fork notice**: This repository is a personal fork of [inkdust2021/VibeGuard](https://github.com/inkdust2021/VibeGuard), modified under the Apache-2.0 license. It adds **Kimi Code support** (the `vibeguard kimi` proxy route and the `integrations/kimi-code-vibeguard` precheck plugin). It is not affiliated with the upstream project; please do not file issues for fork-specific changes upstream.
+
 
 ## Installation
 
@@ -247,6 +249,15 @@ go test ./...
 go vet ./...
 gofmt -w .
 ```
+
+## Fork Additions (Kimi Code)
+
+This fork adds first-class **Kimi Code** support:
+
+- **Proxy route (transparent redaction + restore)**: `vibeguard kimi [args...]` — same process-only env injection as the other assistants. `api.kimi.com`, `api.moonshot.cn`, and `api.moonshot.ai` are included in the default intercept targets.
+- **Precheck plugin**: `integrations/kimi-code-vibeguard/` — a Kimi Code plugin (`vibeguard-precheck`) that blocks user prompts and `Bash` tool commands containing secrets before they reach the model. Kimi Code's plugin/hook API cannot rewrite outbound messages, so this complements (not replaces) the proxy route. See `integrations/kimi-code-vibeguard/README.md`.
+
+For OpenCode, you can alternatively use the in-process plugin [opencode-vibeguard](https://github.com/inkdust2021/opencode-vibeguard), which redacts inside OpenCode and needs no proxy at all.
 
 ## Included officially
 

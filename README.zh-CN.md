@@ -10,6 +10,8 @@
   <a href="README.md">English</a> | 中文
 </p>
 
+> **Fork 声明**：本仓库是 [inkdust2021/VibeGuard](https://github.com/inkdust2021/VibeGuard) 的个人 fork，基于 Apache-2.0 协议修改。新增 **Kimi Code 支持**（`vibeguard kimi` 代理模式与 `integrations/kimi-code-vibeguard` 预检插件）。与上游项目无关联；fork 特有的改动请勿向上游提交 issue。
+
 
 
 ## 安装
@@ -250,6 +252,15 @@ go test ./...
 go vet ./...
 gofmt -w .
 ```
+
+## 本 Fork 新增（Kimi Code）
+
+本 fork 为 **Kimi Code** 提供了一等支持：
+
+- **代理模式（透明脱敏 + 自动还原）**：`vibeguard kimi [args...]` —— 与其他 CLI 助手相同的进程级环境变量注入；默认拦截目标已包含 `api.kimi.com`、`api.moonshot.cn`、`api.moonshot.ai`。
+- **预检插件**：`integrations/kimi-code-vibeguard/` —— Kimi Code 插件（`vibeguard-precheck`），在敏感内容发给模型前**拦截**包含密钥的用户输入和 `Bash` 命令。由于 Kimi Code 的插件/Hook API 无法改写出站消息，该插件是代理模式的补充而非替代。详见 `integrations/kimi-code-vibeguard/README.md`。
+
+对于 OpenCode，也可以选择进程内插件 [opencode-vibeguard](https://github.com/inkdust2021/opencode-vibeguard)，完全不需要代理。
 
 ## 已被官方收录
 
