@@ -31,8 +31,8 @@ type readTransformFn func([]byte) []byte
 // TransformConn 在 WebSocket 升级后的双向连接上做“上行脱敏、下行还原”。
 // 控制帧、二进制帧和带未知 RSV 位的数据帧透传；带 RSV1（permessage-deflate）的
 // 文本消息会缓存整消息后解压、脱敏/还原，再以未压缩帧转发（RFC 7692 允许逐消息
-// 不压缩）。若对端启用了 context takeover，跨消息回引会导致解压失败，此时该方向
-// 退化为透传并触发一次 OnError。
+// 不压缩）。解压维护 32KiB 滚动明文窗口以支持 context takeover。帧解析或解压失败时
+// 该方向退化为透传：已缓存的帧原文会全部转发（不丢字节），并触发一次 OnError。
 type TransformConn struct {
 	conn io.ReadWriteCloser
 
@@ -110,6 +110,8 @@ type frameTransformer struct {
 
 	msgMode     messageMode
 	msgBuf      bytes.Buffer
+	msgRaw      bytes.Buffer // raw frames buffered alongside msgBuf, re-emitted on degradation
+	inflateDict []byte       // rolling plaintext window for permessage-deflate context takeover
 	passthrough bool
 	pendingErr  error
 }
@@ -151,9 +153,13 @@ func (t *frameTransformer) ReadFrom(src io.Reader, p []byte) (int, error) {
 			t.inBuf.Write(t.tmp[:n])
 			if perr := t.processIncoming(); perr != nil {
 				t.reportError(perr)
+				// Re-emit buffered message fragments (already consumed from inBuf)
+				// before the remaining raw bytes so nothing is dropped.
+				t.outBuf.Write(t.msgRaw.Bytes())
 				t.outBuf.Write(t.inBuf.Bytes())
 				t.inBuf.Reset()
 				t.msgBuf.Reset()
+				t.msgRaw.Reset()
 				t.msgMode = messageModeNone
 				t.passthrough = true
 			}
@@ -184,9 +190,11 @@ func (t *frameTransformer) WriteTo(dst io.Writer, p []byte) (int, error) {
 	if err := t.processIncoming(); err != nil {
 		t.reportError(err)
 		t.passthrough = true
-		raw := append([]byte(nil), t.inBuf.Bytes()...)
+		raw := append([]byte(nil), t.msgRaw.Bytes()...)
+		raw = append(raw, t.inBuf.Bytes()...)
 		t.inBuf.Reset()
 		t.msgBuf.Reset()
+		t.msgRaw.Reset()
 		t.msgMode = messageModeNone
 		if werr := writeAll(dst, raw); werr != nil {
 			return len(p), werr
@@ -217,14 +225,19 @@ const maxInflatedMessageBytes = 32 << 20
 
 // inflateMessage decompresses a permessage-deflate message payload: raw
 // DEFLATE with the trailing 0x00 0x00 0xff 0xff sync marker stripped.
-// Each message is decoded with a fresh reader, so a peer using context
-// takeover (cross-message back-references) makes this fail and the
-// connection degrades to pass-through.
-func inflateMessage(payload []byte) ([]byte, error) {
+// dict is the rolling plaintext window of previous messages; supplying it
+// supports peers that keep compression context across messages (RFC 7692
+// context takeover) and is harmless when the peer resets context.
+func inflateMessage(payload, dict []byte) ([]byte, error) {
 	buf := make([]byte, 0, len(payload)+4)
 	buf = append(buf, payload...)
 	buf = append(buf, 0x00, 0x00, 0xff, 0xff)
-	r := flate.NewReader(bytes.NewReader(buf))
+	var r io.ReadCloser
+	if len(dict) > 0 {
+		r = flate.NewReaderDict(bytes.NewReader(buf), dict)
+	} else {
+		r = flate.NewReader(bytes.NewReader(buf))
+	}
 	defer r.Close()
 	out, err := io.ReadAll(io.LimitReader(r, maxInflatedMessageBytes+1))
 	if err != nil {
@@ -236,6 +249,17 @@ func inflateMessage(payload []byte) ([]byte, error) {
 	return out, nil
 }
 
+// deflateWindowSize is the LZ77 window used by permessage-deflate (RFC 7691/7692).
+const deflateWindowSize = 32 * 1024
+
+func rollDeflateDict(dict, plain []byte) []byte {
+	dict = append(dict, plain...)
+	if len(dict) > deflateWindowSize {
+		dict = append([]byte(nil), dict[len(dict)-deflateWindowSize:]...)
+	}
+	return dict
+}
+
 func (t *frameTransformer) processIncoming() error {
 	for {
 		frame, ok, err := parseFrame(t.inBuf.Bytes())
@@ -245,12 +269,14 @@ func (t *frameTransformer) processIncoming() error {
 		if !ok {
 			return nil
 		}
-		t.inBuf.Next(frame.totalLen)
 
+		// Consume the frame only after it was handled successfully: on failure the
+		// raw bytes stay in inBuf and are forwarded verbatim by the passthrough path.
 		out, err := t.handleFrame(frame)
 		if err != nil {
 			return err
 		}
+		t.inBuf.Next(frame.totalLen)
 		if len(out) > 0 {
 			t.outBuf.Write(out)
 		}
@@ -270,7 +296,9 @@ func (t *frameTransformer) handleFrame(frame wsFrame) ([]byte, error) {
 				return t.transformCompressedMessage(frame.payload)
 			}
 			t.msgBuf.Reset()
+			t.msgRaw.Reset()
 			t.msgBuf.Write(frame.payload)
+			t.msgRaw.Write(frame.raw)
 			t.msgMode = messageModeBufferCompressed
 			return nil, nil
 		}
@@ -284,7 +312,9 @@ func (t *frameTransformer) handleFrame(frame wsFrame) ([]byte, error) {
 			return t.transformTextMessage(frame.payload)
 		}
 		t.msgBuf.Reset()
+		t.msgRaw.Reset()
 		t.msgBuf.Write(frame.payload)
+		t.msgRaw.Write(frame.raw)
 		t.msgMode = messageModeBufferText
 		return nil, nil
 
@@ -296,25 +326,32 @@ func (t *frameTransformer) handleFrame(frame wsFrame) ([]byte, error) {
 
 	case wsOpcodeContinuation:
 		switch t.msgMode {
-		case messageModeBufferText:
+		case messageModeBufferText, messageModeBufferCompressed:
+			compressed := t.msgMode == messageModeBufferCompressed
 			t.msgBuf.Write(frame.payload)
 			if !frame.fin {
+				// Still buffering: the frame is consumed from inBuf after this
+				// returns, so keep its raw bytes for a possible degradation flush.
+				t.msgRaw.Write(frame.raw)
 				return nil, nil
 			}
 			payload := append([]byte(nil), t.msgBuf.Bytes()...)
-			t.msgBuf.Reset()
 			t.msgMode = messageModeNone
-			return t.transformTextMessage(payload)
-
-		case messageModeBufferCompressed:
-			t.msgBuf.Write(frame.payload)
-			if !frame.fin {
-				return nil, nil
+			var out []byte
+			var err error
+			if compressed {
+				out, err = t.transformCompressedMessage(payload)
+			} else {
+				out, err = t.transformTextMessage(payload)
 			}
-			payload := append([]byte(nil), t.msgBuf.Bytes()...)
+			if err != nil {
+				// Keep msgRaw (earlier fragments) intact; the failing frame is still
+				// in inBuf, so the passthrough flush re-emits the message verbatim.
+				return nil, err
+			}
 			t.msgBuf.Reset()
-			t.msgMode = messageModeNone
-			return t.transformCompressedMessage(payload)
+			t.msgRaw.Reset()
+			return out, nil
 
 		case messageModePassthroughText, messageModePassthroughBinary:
 			if frame.fin {
@@ -341,12 +378,16 @@ func (t *frameTransformer) transformTextMessage(payload []byte) ([]byte, error) 
 // transformCompressedMessage inflates a permessage-deflate text message,
 // transforms it, and re-emits it as an uncompressed text frame (RFC 7692
 // allows an endpoint to send any message uncompressed once the extension is
-// negotiated).
+// negotiated). The rolling plaintext dictionary supports peers that keep
+// compression context across messages (context takeover).
 func (t *frameTransformer) transformCompressedMessage(payload []byte) ([]byte, error) {
-	plain, err := inflateMessage(payload)
+	plain, err := inflateMessage(payload, t.inflateDict)
 	if err != nil {
 		return nil, fmt.Errorf("inflate permessage-deflate frame: %w", err)
 	}
+	// Track the pre-transform plaintext: the peer's compressor window references
+	// the original (redacted) text, not what we forward downstream.
+	t.inflateDict = rollDeflateDict(t.inflateDict, plain)
 	return t.transformTextMessage(plain)
 }
 

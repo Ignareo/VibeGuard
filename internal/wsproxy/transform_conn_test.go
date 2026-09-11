@@ -346,3 +346,129 @@ func TestTransformConnWrite_MalformedFrameReportsErrorOnceAndPassesThrough(t *te
 		t.Fatalf("expected OnError to fire exactly once, got %d", errCount)
 	}
 }
+
+// compressMessageWithDict compresses payload the way a peer keeping compression
+// context would: the flate writer is given the previous messages' plaintext as
+// dictionary, so the output may contain back-references into it.
+func compressMessageWithDict(t *testing.T, dict, payload []byte) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	w, err := flate.NewWriterDict(&buf, flate.DefaultCompression, dict)
+	if err != nil {
+		t.Fatalf("flate.NewWriterDict: %v", err)
+	}
+	if _, err := w.Write(payload); err != nil {
+		t.Fatalf("flate write: %v", err)
+	}
+	if err := w.Flush(); err != nil {
+		t.Fatalf("flate flush: %v", err)
+	}
+	_ = w.Close()
+	out := buf.Bytes()
+	if len(out) < 4 {
+		t.Fatalf("compressed payload too short: %d", len(out))
+	}
+	return out[:len(out)-4]
+}
+
+func TestTransformConnRead_InflatesContextTakeoverMessages(t *testing.T) {
+	sess := session.NewManager(time.Minute, 16)
+	t.Cleanup(sess.Close)
+
+	eng := redact.NewEngine(sess, "__VG_")
+	eng.AddKeyword("Alice", "NAME")
+	redacted, _ := eng.RedactWithMatches([]byte("hello Alice"))
+
+	// Two messages sharing compression context: the second message repeats most
+	// of the first, so with context takeover it back-references message 1.
+	msg1 := []byte("prefix " + string(redacted) + " suffix")
+	msg2 := []byte("prefix " + string(redacted) + " suffix again")
+
+	c1 := compressMessage(t, msg1)
+	c2 := compressMessageWithDict(t, msg1, msg2)
+
+	f1 := buildRSV1Frame(t, false, c1)
+	f2 := buildRSV1Frame(t, false, c2)
+
+	conn := NewTransformConn(pipeReadWriteCloser{
+		Reader: bytes.NewReader(append(f1, f2...)),
+		Writer: io.Discard,
+		closer: io.NopCloser(bytes.NewReader(nil)),
+	}, eng, restore.NewEngine(sess, "__VG_"))
+
+	got, err := io.ReadAll(conn)
+	if err != nil {
+		t.Fatalf("read failed: %v", err)
+	}
+
+	var restored []byte
+	for len(got) > 0 {
+		frame, ok, err := parseFrame(got)
+		if err != nil || !ok {
+			t.Fatalf("parse restored frame failed: ok=%v err=%v", ok, err)
+		}
+		if frame.rsv != 0 {
+			t.Fatalf("expected uncompressed forwarded frame, rsv=%#x", frame.rsv)
+		}
+		restored = append(restored, frame.payload...)
+		got = got[frame.totalLen:]
+	}
+	want := "prefix hello Alice suffixprefix hello Alice suffix again"
+	if string(restored) != want {
+		t.Fatalf("expected %q, got %q", want, restored)
+	}
+}
+
+func TestTransformConnWrite_DegradationPreservesBufferedMessageBytes(t *testing.T) {
+	sess := session.NewManager(time.Minute, 16)
+	t.Cleanup(sess.Close)
+
+	eng := redact.NewEngine(sess, "__VG_")
+
+	clientSide, upstreamSide := io.Pipe()
+	defer upstreamSide.Close()
+
+	conn := NewTransformConn(pipeReadWriteCloser{
+		Reader: bytes.NewReader(nil),
+		Writer: upstreamSide,
+		closer: io.NopCloser(bytes.NewReader(nil)),
+	}, eng, restore.NewEngine(sess, "__VG_"))
+
+	errCount := 0
+	conn.SetOnError(func(error) { errCount++ })
+
+	// A fragmented compressed message: first frame is buffered (not emitted),
+	// then a malformed continuation frame arrives. Degradation must forward the
+	// buffered first frame verbatim plus the offending frame — no byte loss.
+	first, err := buildFrame(false, wsOpcodeText, true, []byte("partial-payload"))
+	if err != nil {
+		t.Fatalf("build frame 1: %v", err)
+	}
+	first[0] |= 0x40 // RSV1: compressed, non-final -> buffered
+
+	bad, err := buildFrame(true, wsOpcodeContinuation, true, []byte("not-valid-deflate"))
+	if err != nil {
+		t.Fatalf("build frame 2: %v", err)
+	}
+
+	raw := append(first, bad...)
+
+	done := make(chan []byte, 1)
+	go func() {
+		buf, _ := io.ReadAll(clientSide)
+		done <- buf
+	}()
+
+	if n, err := conn.Write(raw); err != nil || n != len(raw) {
+		t.Fatalf("write failed: n=%d err=%v", n, err)
+	}
+	_ = upstreamSide.Close()
+
+	out := <-done
+	if !bytes.Equal(out, raw) {
+		t.Fatalf("expected all raw bytes forwarded on degradation\ngot:  %x\nwant: %x", out, raw)
+	}
+	if errCount != 1 {
+		t.Fatalf("expected OnError to fire exactly once, got %d", errCount)
+	}
+}
