@@ -522,8 +522,25 @@ func (s *Server) setupHandlers() {
 		req.Header.Set("Accept-Encoding", "identity")
 
 		// Handle request body redaction
-		if req.Body != nil && req.Body != http.NoBody && isTextContent(contentType) {
+		multipart := isMultipartFormData(contentType)
+		textLike := isTextContent(contentType)
+		sniffedJSON := false
+		if !textLike && !multipart && strings.TrimSpace(contentType) == "" && req.Body != nil && req.Body != http.NoBody {
+			// Some clients omit Content-Type on JSON bodies: sniff a small prefix and put the bytes back.
+			br := bufio.NewReaderSize(req.Body, 4096)
+			peek, _ := br.Peek(512)
+			req.Body = &readerWithClose{r: br, c: req.Body}
+			if looksLikeJSONBody(peek) {
+				textLike = true
+				sniffedJSON = true
+				contentType = "application/json"
+			}
+		}
+		if req.Body != nil && req.Body != http.NoBody && (textLike || multipart) {
 			auditEv.Attempted = true
+			if sniffedJSON {
+				auditEv.Note = appendAuditNote(auditEv.Note, "content_type_sniffed")
+			}
 			contentEncodingHeader := req.Header.Get("Content-Encoding")
 			if !isSupportedContentEncodingHeader(contentEncodingHeader) {
 				// Unknown/unsupported encoding: skip redaction to avoid corrupting binary bodies by false matches.
@@ -599,7 +616,8 @@ func (s *Server) setupHandlers() {
 			}
 
 			// Extra defense: do not redact non-UTF-8 text to avoid corrupting binary/garbled bodies.
-			if !utf8.Valid(body) {
+			// (multipart bodies are exempt: binary parts are legal there; each part is checked separately.)
+			if !multipart && !utf8.Valid(body) {
 				req.Body = io.NopCloser(bytes.NewReader(rawBody))
 				req.ContentLength = int64(len(rawBody))
 				req.Header.Set("Content-Length", fmt.Sprintf("%d", len(rawBody)))
@@ -615,7 +633,23 @@ func (s *Server) setupHandlers() {
 				redacted []byte
 				matches  []redact.Match
 			)
-			if strings.Contains(contentType, "application/json") {
+			if multipart {
+				// multipart/form-data: redact only the text parts (form fields and text files),
+				// binary parts are forwarded untouched and the boundary is preserved.
+				out, ms, merr := redactMultipartBody(rt.redactEng, body, contentType)
+				if merr != nil {
+					slog.Warn("Failed to parse multipart body; forwarding unredacted", "host", host, "error", merr)
+					auditEv.Attempted = false
+					auditEv.Note = appendAuditNote(auditEv.Note, "multipart_error")
+					recordAudit()
+					req.Body = io.NopCloser(bytes.NewReader(body))
+					req.ContentLength = int64(len(body))
+					req.Header.Set("Content-Length", fmt.Sprintf("%d", len(body)))
+					return req, nil
+				}
+				redacted = out
+				matches = ms
+			} else if strings.Contains(contentType, "application/json") {
 				if out, ms, changed, jerr := promptredact.RedactJSONBody(rt.redactEng, body); jerr == nil && changed {
 					redacted = out
 					matches = ms
@@ -1106,19 +1140,28 @@ func (s *Server) setupHandlers() {
 	}))
 }
 
-// isTextContent checks if content type is text-like
+// isTextContent checks if content type is text-like (aligned with the response side:
+// JSON family including +json/x-ndjson, text/*, form-urlencoded, XML).
 func isTextContent(contentType string) bool {
-	textTypes := []string{
-		"application/json",
-		"text/",
-		"application/x-www-form-urlencoded",
+	if strings.TrimSpace(contentType) == "" {
+		return false
 	}
-	for _, t := range textTypes {
-		if strings.Contains(contentType, t) {
-			return true
-		}
+	if isJSONContentType(contentType) {
+		return true
 	}
-	return false
+	mt, _, err := mime.ParseMediaType(contentType)
+	if err != nil {
+		mt = contentType
+	}
+	mt = strings.ToLower(strings.TrimSpace(mt))
+	if strings.HasPrefix(mt, "text/") {
+		return true
+	}
+	switch mt {
+	case "application/x-www-form-urlencoded", "application/xml", "text/xml":
+		return true
+	}
+	return strings.HasSuffix(mt, "+xml")
 }
 
 func isJSONContentType(contentType string) bool {
