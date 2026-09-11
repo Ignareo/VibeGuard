@@ -18,7 +18,7 @@ gofmt -l cmd internal   # files you touched must NOT appear
 - Module deps may need a mirror in China: `GOPROXY=https://goproxy.cn,direct`.
 - **Known pre-existing upstream issues** (do not "fix" unless asked, do not attribute to your change):
   - `go vet` fails on `internal/wsproxy/transform_conn.go` (`ReadFrom` signature).
-  - `gofmt -l` lists `internal/admin/admin.go` and `internal/auditdb/*.go`.
+  - `gofmt -l` lists `internal/auditdb/*.go` (files we have not touched; keep them as-is unless you modify one — then format that file).
 - Most packages have no tests; only add tests to packages that already have them (e.g. `internal/proxy`, `internal/secretsources`, `internal/textsafe`, `internal/wsproxy`, `internal/ahocorasick`, `internal/stream`).
 - Smoke test: `go build -o /tmp/vibeguard-dev ./cmd/vibeguard && /tmp/vibeguard-dev run env | grep -i proxy`, then `vibeguard-dev stop` to clean up the auto-started daemon.
 - Docs are Chinese-only: user docs in `README.md`, developer docs in `docs/TECHNICAL.md`, rule syntax in `docs/RULE_LISTS.md`. Update them when behavior changes.

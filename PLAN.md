@@ -136,3 +136,23 @@
 | P3-6 请求侧 content-type 对齐 | ☑ |
 | P3-7 WebSocket 加固 | ☑ |
 | 审计合规增强 | ☐（按需） |
+
+## 复审修复（2026-09-11，对 ☑ 项的二次审查）
+
+复审在已勾选项目中发现并已修复的问题：
+
+| # | 严重度 | 问题 | 修复 |
+|---|---|---|---|
+| R1 | 高 | P1-2：结构化脱敏未覆盖字段（thinking 块、旧版 function_call.arguments、reasoning.summary、非字符串 arguments/output、document.source.data），且 `changed=false` 时整文本兜底被跳过 → 原文上行 | promptredact 补齐五类字段；`changed=false` 也走整文本兜底（JSON 破坏仍由 invalid_json_policy 处理） |
+| R2 | 高 | P3-1：WAL 快照与 Compact 不在 `m.mu` 临界区内，并发 Append 可能写进旧文件后被 rename 覆盖 → 重启丢映射 | register/GetOrCreatePlaceholder 的 WAL Append 移入 `m.mu`；compaction 持写锁完成快照+重写 |
+| R3 | 高 | P3-7：降级时丢弃出错帧与已缓存分片；context takeover 下每条消息新建 flate reader 导致永久透传 | 帧解析成功后才消费 inBuf + msgRaw 缓存原始帧，降级时全量转发；维护 32KiB 滚动明文字典（`flate.NewReaderDict`）支持 context takeover |
+| R4 | 高 | P2-4：http.Client 默认跟随重定向，https→http 降级可绕过 allow_http 与 TOFU 钉扎 | 包装 client 的 CheckRedirect：每次跳转重新走 validateRemoteURL，限 10 跳 |
+| R5 | 高 | P1-5：SQLite DSN `?_journal_mode=WAL&_busy_timeout=5000` 对 modernc.org/sqlite v1.46.1 无效（实测 journal=delete, busy_timeout=0） | 改用 `_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)`；启动校验 journal_mode；chmod 覆盖 `-journal` |
+| R6 | 中 | P2-4 钉扎三缺陷：URL 变更后仍用旧 pin 校验；304 分支跳过 pin 校验；比较非恒定时间 | 改用 meta.PinnedSHA256（重置后重新 TOFU）；304 时对缓存内容哈希做 pin 校验；`subtle.ConstantTimeCompare` |
+| R7 | 中 | P1-5：项目配置单向 OR，无法关闭 persist_raw_values | 字段改 `*bool`，项目级可显式 `false` 覆盖 |
+| R8 | 中 | P2-5：NER 失败只有全局计数器，未挂到请求的审计 note | 请求处理前后对 NERFailures 取差值，非零则审计 note 加 `ner_failure` |
+| R9 | 中 | P3-6：请求侧仍用 `strings.Contains(contentType,"application/json")` | 改用 `isJSONContentType`（与响应侧一致，含 +json/text/json） |
+| R10 | 中 | P2-3：` :: ` 后缀无条件切分，历史正则含字面 ` :: ` 会被截断/报错 | 仅当尾部是合法校验器标识符（单字母词）时才按校验器解析；未知但形似 → 报错（防笔误） |
+| R11 | 中 | invalid_json_policy 文档宣传 `allow` 但未实现 | 实现 `allow`（转发原文，note `invalid_json_allow`）；config 校验与两处 init 模板同步 |
+
+另：`internal/admin/admin.go` 已 gofmt（此前属既有未格式化文件，但本批次有改动）。
