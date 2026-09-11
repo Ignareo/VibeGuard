@@ -159,9 +159,12 @@ func (t *textStreamRestorer) Feed(fragment string) string {
 	}
 
 	out := t.eng.Restore(t.buf[:cut])
+	// Restore may return a subslice of its input (no replacements); copy to
+	// string before shifting the tail down over the same backing array.
+	s := string(out)
 	// Keep the tail (placeholder prefix or incomplete placeholder) and wait for the next fragment.
 	t.buf = append(t.buf[:0], t.buf[cut:]...)
-	return string(out)
+	return s
 }
 
 func (t *textStreamRestorer) Flush() string {

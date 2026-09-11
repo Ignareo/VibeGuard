@@ -2,9 +2,11 @@ package wsproxy
 
 import (
 	"bytes"
+	"compress/flate"
 	"crypto/rand"
 	"encoding/binary"
 	"encoding/json"
+	"fmt"
 	"io"
 	"sync"
 	"unicode/utf8"
@@ -12,6 +14,7 @@ import (
 	"github.com/inkdust2021/vibeguard/internal/promptredact"
 	"github.com/inkdust2021/vibeguard/internal/redact"
 	"github.com/inkdust2021/vibeguard/internal/restore"
+	"github.com/inkdust2021/vibeguard/internal/stream"
 )
 
 const (
@@ -26,7 +29,10 @@ const (
 type readTransformFn func([]byte) []byte
 
 // TransformConn 在 WebSocket 升级后的双向连接上做“上行脱敏、下行还原”。
-// 当前实现只处理未压缩的文本消息；控制帧、二进制帧和带 RSV 位的数据帧全部透传。
+// 控制帧、二进制帧和带未知 RSV 位的数据帧透传；带 RSV1（permessage-deflate）的
+// 文本消息会缓存整消息后解压、脱敏/还原，再以未压缩帧转发（RFC 7692 允许逐消息
+// 不压缩）。若对端启用了 context takeover，跨消息回引会导致解压失败，此时该方向
+// 退化为透传并触发一次 OnError。
 type TransformConn struct {
 	conn io.ReadWriteCloser
 
@@ -38,13 +44,16 @@ type TransformConn struct {
 }
 
 func NewTransformConn(conn io.ReadWriteCloser, redactor redact.Redactor, restorer *restore.Engine) *TransformConn {
+	// Downstream messages may split a placeholder across frames/messages;
+	// MessageRestorer carries the incomplete tail into the next message.
+	msgRestorer := stream.NewMessageRestorer(restorer)
 	return &TransformConn{
 		conn: conn,
 		readState: newFrameTransformer(false, func(payload []byte) []byte {
-			if restorer == nil {
+			if msgRestorer == nil {
 				return append([]byte(nil), payload...)
 			}
-			return restorer.Restore(payload)
+			return msgRestorer.Feed(payload)
 		}),
 		writeState: newFrameTransformer(true, func(payload []byte) []byte {
 			if redactor == nil {
@@ -83,9 +92,17 @@ func (c *TransformConn) Close() error {
 	return c.conn.Close()
 }
 
+// SetOnError registers a hook invoked once per direction when frame parsing
+// or transform fails and that direction degrades to pass-through.
+func (c *TransformConn) SetOnError(fn func(error)) {
+	c.readState.onError = fn
+	c.writeState.onError = fn
+}
+
 type frameTransformer struct {
 	maskOutput bool
 	transform  readTransformFn
+	onError    func(error)
 
 	inBuf  bytes.Buffer
 	outBuf bytes.Buffer
@@ -102,6 +119,7 @@ type messageMode int
 const (
 	messageModeNone messageMode = iota
 	messageModeBufferText
+	messageModeBufferCompressed
 	messageModePassthroughText
 	messageModePassthroughBinary
 )
@@ -132,6 +150,7 @@ func (t *frameTransformer) ReadFrom(src io.Reader, p []byte) (int, error) {
 		if n > 0 {
 			t.inBuf.Write(t.tmp[:n])
 			if perr := t.processIncoming(); perr != nil {
+				t.reportError(perr)
 				t.outBuf.Write(t.inBuf.Bytes())
 				t.inBuf.Reset()
 				t.msgBuf.Reset()
@@ -163,6 +182,7 @@ func (t *frameTransformer) WriteTo(dst io.Writer, p []byte) (int, error) {
 
 	t.inBuf.Write(p)
 	if err := t.processIncoming(); err != nil {
+		t.reportError(err)
 		t.passthrough = true
 		raw := append([]byte(nil), t.inBuf.Bytes()...)
 		t.inBuf.Reset()
@@ -183,6 +203,37 @@ func (t *frameTransformer) WriteTo(dst io.Writer, p []byte) (int, error) {
 	}
 
 	return len(p), nil
+}
+
+func (t *frameTransformer) reportError(err error) {
+	if t.onError != nil {
+		t.onError(err)
+	}
+}
+
+// maxInflatedMessageBytes caps a decompressed permessage-deflate message to
+// guard against zip bombs on the (TLS-authenticated but untrusted) upstream.
+const maxInflatedMessageBytes = 32 << 20
+
+// inflateMessage decompresses a permessage-deflate message payload: raw
+// DEFLATE with the trailing 0x00 0x00 0xff 0xff sync marker stripped.
+// Each message is decoded with a fresh reader, so a peer using context
+// takeover (cross-message back-references) makes this fail and the
+// connection degrades to pass-through.
+func inflateMessage(payload []byte) ([]byte, error) {
+	buf := make([]byte, 0, len(payload)+4)
+	buf = append(buf, payload...)
+	buf = append(buf, 0x00, 0x00, 0xff, 0xff)
+	r := flate.NewReader(bytes.NewReader(buf))
+	defer r.Close()
+	out, err := io.ReadAll(io.LimitReader(r, maxInflatedMessageBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(out) > maxInflatedMessageBytes {
+		return nil, fmt.Errorf("inflated message exceeds %d bytes", maxInflatedMessageBytes)
+	}
+	return out, nil
 }
 
 func (t *frameTransformer) processIncoming() error {
@@ -213,6 +264,16 @@ func (t *frameTransformer) handleFrame(frame wsFrame) ([]byte, error) {
 
 	switch frame.opcode {
 	case wsOpcodeText:
+		if frame.rsv == 0x40 {
+			// permessage-deflate compressed text message (RSV1 on first frame only).
+			if frame.fin {
+				return t.transformCompressedMessage(frame.payload)
+			}
+			t.msgBuf.Reset()
+			t.msgBuf.Write(frame.payload)
+			t.msgMode = messageModeBufferCompressed
+			return nil, nil
+		}
 		if frame.rsv != 0 {
 			if !frame.fin {
 				t.msgMode = messageModePassthroughText
@@ -245,6 +306,16 @@ func (t *frameTransformer) handleFrame(frame wsFrame) ([]byte, error) {
 			t.msgMode = messageModeNone
 			return t.transformTextMessage(payload)
 
+		case messageModeBufferCompressed:
+			t.msgBuf.Write(frame.payload)
+			if !frame.fin {
+				return nil, nil
+			}
+			payload := append([]byte(nil), t.msgBuf.Bytes()...)
+			t.msgBuf.Reset()
+			t.msgMode = messageModeNone
+			return t.transformCompressedMessage(payload)
+
 		case messageModePassthroughText, messageModePassthroughBinary:
 			if frame.fin {
 				t.msgMode = messageModeNone
@@ -265,6 +336,18 @@ func (t *frameTransformer) transformTextMessage(payload []byte) ([]byte, error) 
 		return buildFrame(true, wsOpcodeText, t.maskOutput, payload)
 	}
 	return buildFrame(true, wsOpcodeText, t.maskOutput, t.transform(payload))
+}
+
+// transformCompressedMessage inflates a permessage-deflate text message,
+// transforms it, and re-emits it as an uncompressed text frame (RFC 7692
+// allows an endpoint to send any message uncompressed once the extension is
+// negotiated).
+func (t *frameTransformer) transformCompressedMessage(payload []byte) ([]byte, error) {
+	plain, err := inflateMessage(payload)
+	if err != nil {
+		return nil, fmt.Errorf("inflate permessage-deflate frame: %w", err)
+	}
+	return t.transformTextMessage(plain)
 }
 
 type wsFrame struct {
@@ -293,6 +376,28 @@ func parseFrame(buf []byte) (wsFrame, bool, error) {
 	frame.rsv = b0 & 0x70
 	frame.opcode = b0 & 0x0f
 	frame.masked = b1&0x80 != 0
+
+	// Protocol validation (RFC 6455): without negotiated extensions only
+	// RSV1 (permessage-deflate) may be set, and only on the first frame of
+	// a data message; control frames must be final and <= 125 bytes.
+	if frame.rsv&0x30 != 0 {
+		return frame, false, fmt.Errorf("websocket frame has RSV2/RSV3 set (rsv=%#x)", frame.rsv)
+	}
+	if frame.rsv&0x40 != 0 && frame.opcode != wsOpcodeText && frame.opcode != wsOpcodeBinary {
+		return frame, false, fmt.Errorf("websocket frame has RSV1 on opcode %#x", frame.opcode)
+	}
+	switch frame.opcode {
+	case wsOpcodeContinuation, wsOpcodeText, wsOpcodeBinary:
+	case wsOpcodeClose, wsOpcodePing, wsOpcodePong:
+		if !frame.fin {
+			return frame, false, fmt.Errorf("fragmented control frame (opcode %#x)", frame.opcode)
+		}
+		if b1&0x7f > 125 {
+			return frame, false, fmt.Errorf("control frame (opcode %#x) payload too large", frame.opcode)
+		}
+	default:
+		return frame, false, fmt.Errorf("unknown websocket opcode %#x", frame.opcode)
+	}
 
 	payloadLen := uint64(b1 & 0x7f)
 	offset := 2

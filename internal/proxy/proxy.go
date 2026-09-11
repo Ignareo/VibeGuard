@@ -809,20 +809,33 @@ func (s *Server) setupHandlers() {
 		if isWebSocketUpgradeRequest(ctx.Req) && resp.StatusCode == http.StatusSwitchingProtocols {
 			if rt.websocketRedactionBeta {
 				if hasWebSocketExtensionToken(resp.Header, "Sec-WebSocket-Extensions", "permessage-deflate") {
-					slog.Warn("WebSocket response still negotiated permessage-deflate after client-side strip; falling back to pass-through", "host", host)
-					return resp
+					// The transform layer inflates RSV1 text frames and forwards
+					// them uncompressed, which RFC 7692 permits per message.
+					slog.Info("WebSocket negotiated permessage-deflate; frames will be decompressed inline for redaction", "host", host)
+				}
+				wrap := func(rwc io.ReadWriteCloser) io.ReadCloser {
+					tc := wsproxy.NewTransformConn(rwc, rt.redactEng, rt.restoreEng)
+					tc.SetOnError(func(err error) {
+						slog.Warn("WebSocket frame parse/transform failed; direction switched to pass-through", "host", host, "error", err)
+						if auditID > 0 {
+							s.admin.UpdateAudit(auditID, func(ev *admin.AuditEvent) {
+								ev.Note = appendAuditNote(ev.Note, "ws_frame_parse_error")
+							})
+						}
+					})
+					return tc
 				}
 				switch rwc := any(resp.Body).(type) {
 				case io.ReadWriteCloser:
-					resp.Body = wsproxy.NewTransformConn(rwc, rt.redactEng, rt.restoreEng)
+					resp.Body = wrap(rwc)
 				case interface {
 					io.ReadCloser
 					io.Writer
 				}:
-					resp.Body = wsproxy.NewTransformConn(&readWriteCloserAdapter{
+					resp.Body = wrap(&readWriteCloserAdapter{
 						ReadCloser: rwc,
 						writer:     rwc,
-					}, rt.redactEng, rt.restoreEng)
+					})
 				default:
 					slog.Warn("WebSocket redaction beta requested, but upgraded connection is not writable; falling back to pass-through", "host", host)
 				}
