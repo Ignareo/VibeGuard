@@ -229,15 +229,22 @@ func Parse(r io.Reader, opts ParseOptions) (*Recognizer, error) {
 			var valid Validator
 			if idx := strings.LastIndex(pat, " :: "); idx >= 0 {
 				name := strings.TrimSpace(pat[idx+4:])
-				pat = strings.TrimSpace(pat[:idx])
-				if pat == "" {
-					return nil, fmt.Errorf("规则列表第 %d 行：regex PATTERN 为空", lineNo)
+				// Backward compatibility: only treat the trailing " :: <name>" as a
+				// validator suffix when <name> looks like a validator identifier (a
+				// single word of letters/underscore). A literal " :: " inside a
+				// historical regex (e.g. followed by punctuation or a space-containing
+				// fragment) stays part of the pattern.
+				if isValidatorNameToken(name) {
+					pat = strings.TrimSpace(pat[:idx])
+					if pat == "" {
+						return nil, fmt.Errorf("规则列表第 %d 行：regex PATTERN 为空", lineNo)
+					}
+					v, err := lookupValidator(name)
+					if err != nil {
+						return nil, fmt.Errorf("规则列表第 %d 行：%w", lineNo, err)
+					}
+					valid = v
 				}
-				v, err := lookupValidator(name)
-				if err != nil {
-					return nil, fmt.Errorf("规则列表第 %d 行：%w", lineNo, err)
-				}
-				valid = v
 			}
 			re, err := regexp.Compile(pat)
 			if err != nil {
@@ -282,6 +289,22 @@ func min(a, b int) int {
 		return a
 	}
 	return b
+}
+
+// isValidatorNameToken reports whether s looks like a validator identifier
+// (a single word of ASCII letters or underscore), used to distinguish a
+// trailing " :: luhn" validator suffix from a literal " :: " inside a regex.
+func isValidatorNameToken(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if (c < 'a' || c > 'z') && (c < 'A' || c > 'Z') && c != '_' {
+			return false
+		}
+	}
+	return true
 }
 
 func ParseFile(path string, opts ParseOptions) (*Recognizer, error) {

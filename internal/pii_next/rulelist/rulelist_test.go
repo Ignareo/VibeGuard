@@ -104,3 +104,20 @@ func TestRegexWithoutValidatorUnchanged(t *testing.T) {
 		t.Errorf("plain regex rule should still match")
 	}
 }
+
+func TestValidatorSuffixBackwardCompat(t *testing.T) {
+	// A literal " :: " inside the pattern (tail is not a validator identifier)
+	// must stay part of the regex, as before validators existed.
+	rec := parseRules(t, `regex PAIR (\w+) :: (\d+)`)
+	if !hasMatchAt(rec, "key :: 42", "key") {
+		t.Errorf("literal ' :: ' inside regex should remain part of the pattern")
+	}
+
+	// A word-like tail that is not a known validator still fails loudly (typo guard).
+	if _, err := Parse(strings.NewReader(`regex FOO (\d+) :: luhm`), ParseOptions{Name: "test"}); err == nil {
+		t.Errorf("unknown validator name should fail parsing")
+	}
+
+	// Case-insensitive known validator names are accepted.
+	parseRules(t, `regex BANK_CARD (\d{16,19}) :: LUHN`)
+}
