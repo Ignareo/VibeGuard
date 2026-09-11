@@ -9,6 +9,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"strings"
 	"sync"
 	"time"
 )
@@ -119,32 +120,109 @@ func (m *Manager) LookupReverse(original string) (string, bool) {
 }
 
 // GeneratePlaceholder creates a placeholder for the given original value (does NOT register it).
-// Uses a truncated HMAC-SHA256(key, original) token: stable mapping for the same original, while reducing dictionary-guessing risk.
+// Uses a truncated HMAC-SHA256(key, original) token plus a 2-hex-digit checksum
+// (HMAC(key, hash12)) so the restore side can distinguish our genuine placeholders
+// from lookalike model output when the mapping has been lost.
 func (m *Manager) GeneratePlaceholder(original, category, prefix string) string {
-	key := m.placeholderKey()
-	h := hmac.New(sha256.New, key)
-	_, _ = h.Write([]byte(original))
-	sum := h.Sum(nil)
-	hash12 := hex.EncodeToString(sum)[:12]
-	placeholder := fmt.Sprintf("%s%s_%s__", prefix, category, hash12)
+	base, collision := m.placeholderParts(original, category, prefix)
 
 	m.mu.RLock()
-	existing, exists := m.forward[placeholder]
-	m.mu.RUnlock()
-	if exists && existing != original {
+	defer m.mu.RUnlock()
+	if existing, exists := m.forward[base]; exists && existing != original {
 		for i := 2; ; i++ {
-			ph := fmt.Sprintf("%s%s_%s_%d__", prefix, category, hash12, i)
-			m.mu.RLock()
-			existing, ok := m.forward[ph]
-			m.mu.RUnlock()
-			if !ok || existing == original {
-				placeholder = ph
-				break
+			ph := collision(i)
+			if e, ok := m.forward[ph]; !ok || e == original {
+				return ph
 			}
 		}
 	}
+	return base
+}
 
-	return placeholder
+// placeholderParts returns the base placeholder and a collision-suffix constructor.
+// The hash part is 14 hex chars: hash12 (from the original) + ck2 (checksum of hash12).
+func (m *Manager) placeholderParts(original, category, prefix string) (base string, collision func(i int) string) {
+	key := m.placeholderKey()
+	h := hmac.New(sha256.New, key)
+	_, _ = h.Write([]byte(original))
+	hash12 := hex.EncodeToString(h.Sum(nil))[:12]
+	ck := m.placeholderChecksum(key, hash12)
+	hash14 := hash12 + ck
+	return fmt.Sprintf("%s%s_%s__", prefix, category, hash14), func(i int) string {
+		return fmt.Sprintf("%s%s_%s_%d__", prefix, category, hash14, i)
+	}
+}
+
+// placeholderChecksum computes the 2-hex-digit checksum bound to the placeholder key.
+func (m *Manager) placeholderChecksum(key []byte, hash12 string) string {
+	h := hmac.New(sha256.New, key)
+	_, _ = h.Write([]byte("ck|" + hash12))
+	return hex.EncodeToString(h.Sum(nil))[:2]
+}
+
+// VerifyPlaceholderChecksum reports whether the token is a checksum-valid placeholder
+// produced by this manager (14-hex hash part). Legacy 12-hex placeholders (from before
+// the checksum existed, e.g. restored from an old WAL) cannot be verified and return false.
+func (m *Manager) VerifyPlaceholderChecksum(token string) bool {
+	t := strings.TrimSpace(token)
+	t = strings.TrimSuffix(t, "__")
+	hashPart := splitPlaceholderHash(t)
+	if len(hashPart) != 14 {
+		return false
+	}
+	key := m.placeholderKey()
+	return m.placeholderChecksum(key, hashPart[:12]) == hashPart[12:]
+}
+
+// splitPlaceholderHash extracts the hash segment (12 or 14 hex chars) from a placeholder
+// body with the trailing "__" already stripped, tolerating an optional "_N" collision suffix.
+func splitPlaceholderHash(t string) string {
+	i := strings.LastIndexByte(t, '_')
+	if i < 0 {
+		return ""
+	}
+	seg := t[i+1:]
+	if isHexSeg(seg) && (len(seg) == 14 || len(seg) == 12) {
+		return seg
+	}
+	if isDigitsSeg(seg) {
+		// Collision suffix _N: the hash segment is one field earlier.
+		t2 := t[:i]
+		j := strings.LastIndexByte(t2, '_')
+		if j < 0 {
+			return ""
+		}
+		seg2 := t2[j+1:]
+		if isHexSeg(seg2) && (len(seg2) == 14 || len(seg2) == 12) {
+			return seg2
+		}
+	}
+	return ""
+}
+
+func isHexSeg(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+func isDigitsSeg(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 // GetOrCreatePlaceholder returns the existing placeholder for original, or generates,
@@ -158,11 +236,7 @@ func (m *Manager) GetOrCreatePlaceholder(original, category, prefix string) stri
 	}
 	m.mu.RUnlock()
 
-	key := m.placeholderKey()
-	h := hmac.New(sha256.New, key)
-	_, _ = h.Write([]byte(original))
-	hash12 := hex.EncodeToString(h.Sum(nil))[:12]
-	base := fmt.Sprintf("%s%s_%s__", prefix, category, hash12)
+	base, collisionFn := m.placeholderParts(original, category, prefix)
 
 	createdAt := time.Now()
 
@@ -175,7 +249,7 @@ func (m *Manager) GetOrCreatePlaceholder(original, category, prefix string) stri
 	placeholder := base
 	if existing, exists := m.forward[placeholder]; exists && existing != original {
 		for i := 2; ; i++ {
-			ph := fmt.Sprintf("%s%s_%s_%d__", prefix, category, hash12, i)
+			ph := collisionFn(i)
 			if e, ok := m.forward[ph]; !ok || e == original {
 				placeholder = ph
 				break
@@ -349,24 +423,31 @@ func (m *Manager) ListMappings() []MappingInfo {
 
 	result := make([]MappingInfo, 0, len(m.forward))
 	for placeholder := range m.forward {
-		// Extract category from placeholder format: __VG_CATEGORY_hash__
-		category := "UNKNOWN"
-		if len(placeholder) > 6 && placeholder[:6] == "__VG_" {
-			// Find the second underscore after __VG_
-			for i := 6; i < len(placeholder); i++ {
-				if placeholder[i] == '_' {
-					category = placeholder[6:i]
-					break
-				}
-			}
-		}
-
 		result = append(result, MappingInfo{
 			Placeholder: placeholder,
-			Category:    category,
+			Category:    placeholderCategory(placeholder),
 		})
 	}
 	return result
+}
+
+// placeholderCategory extracts the category from a placeholder like "__VG_CHINA_PHONE_<hash>__"
+// (prefix-agnostic: strips leading underscores, the first segment, and the trailing hash field).
+func placeholderCategory(placeholder string) string {
+	t := strings.TrimSuffix(strings.TrimSpace(placeholder), "__")
+	// Strip the trailing hash (and optional collision suffix).
+	if h := splitPlaceholderHash(t); h != "" {
+		t = strings.TrimSuffix(t[:len(t)-len(h)], "_")
+	}
+	// Strip leading underscores and the prefix segment (e.g. "VG").
+	t = strings.TrimLeft(t, "_")
+	if i := strings.IndexByte(t, '_'); i >= 0 {
+		t = t[i+1:]
+	}
+	if t == "" {
+		return "UNKNOWN"
+	}
+	return t
 }
 
 // cleanupLoop periodically removes expired entries

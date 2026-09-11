@@ -41,6 +41,40 @@ func TestGetOrCreatePlaceholderConcurrent(t *testing.T) {
 	}
 }
 
+func TestPlaceholderChecksumAndCategory(t *testing.T) {
+	m := NewManager(time.Hour, 1000)
+	defer m.Close()
+
+	ph := m.GetOrCreatePlaceholder("some-secret", "CHINA_PHONE", "__VG_")
+	if !m.VerifyPlaceholderChecksum(ph) {
+		t.Fatalf("generated placeholder should pass checksum verification: %q", ph)
+	}
+	if got := placeholderCategory(ph); got != "CHINA_PHONE" {
+		t.Fatalf("category = %q, want CHINA_PHONE", got)
+	}
+
+	// Tamper with one hash character: verification must fail.
+	i := len("__VG_CHINA_PHONE_")
+	b := []byte(ph)
+	if b[i] == 'a' {
+		b[i] = 'b'
+	} else {
+		b[i] = 'a'
+	}
+	if m.VerifyPlaceholderChecksum(string(b)) {
+		t.Fatalf("tampered placeholder should fail verification")
+	}
+	// Legacy 12-hex tokens cannot be verified.
+	if m.VerifyPlaceholderChecksum("__VG_CHINA_PHONE_abcdef123456__") {
+		t.Fatalf("legacy 12-hex token should not verify")
+	}
+	// Collision-suffixed variant verifies too.
+	suffixed := ph[:len(ph)-2] + "_2__"
+	if !m.VerifyPlaceholderChecksum(suffixed) {
+		t.Fatalf("collision-suffixed placeholder should verify: %q", suffixed)
+	}
+}
+
 func TestGetOrCreatePlaceholderDistinct(t *testing.T) {
 	m := NewManager(time.Hour, 1000)
 	defer m.Close()

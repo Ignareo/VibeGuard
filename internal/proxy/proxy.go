@@ -954,6 +954,17 @@ func (s *Server) setupHandlers() {
 			}
 			stats.RestoredRequests.Add(1)
 			restored := rt.restoreEng.Restore(body)
+			if leftovers := rt.restoreEng.FindLeftovers(restored); len(leftovers) > 0 {
+				// Checksum-verified placeholders that could not be restored: the mapping was
+				// lost (TTL expiry / eviction / session clear). Flag it in the audit trail.
+				slog.Warn("Response contains unrestored placeholders (mapping lost or expired)",
+					"host", host, "count", len(leftovers))
+				if auditID > 0 {
+					s.admin.UpdateAudit(auditID, func(ev *admin.AuditEvent) {
+						ev.Note = appendAuditNote(ev.Note, "unrestored_placeholders")
+					})
+				}
+			}
 			resp.Body = io.NopCloser(bytes.NewReader(restored))
 			resp.ContentLength = int64(len(restored))
 			resp.Header.Set("Content-Length", fmt.Sprintf("%d", len(restored)))
@@ -1391,6 +1402,20 @@ func (s *Server) ReloadFromConfig() {
 		"ner_enabled", c.Patterns.NER.Enabled,
 		"exclude", len(c.Patterns.Exclude),
 	)
+}
+
+// appendAuditNote appends a note tag to an audit note field, keeping existing entries.
+func appendAuditNote(note, tag string) string {
+	note = strings.TrimSpace(note)
+	if note == "" {
+		return tag
+	}
+	for _, part := range strings.Split(note, ";") {
+		if strings.TrimSpace(part) == tag {
+			return note
+		}
+	}
+	return note + ";" + tag
 }
 
 // decompressBody decompresses response body based on Content-Encoding
