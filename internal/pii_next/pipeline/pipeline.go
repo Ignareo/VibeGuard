@@ -57,16 +57,17 @@ func (p *Pipeline) RedactWithMatches(input []byte) ([]byte, []redact.Match) {
 	}
 
 	cands := make([]recognizer.Match, 0, 16)
-	for _, span := range textsafe.RedactableSpans(input) {
-		segment := input[span.Start:span.End]
-		if len(segment) == 0 {
+	// Match on a normalized view (zero-width stripped, NFKC) so format-character
+	// insertion and full-width homoglyphs no longer evade detection; reported ranges
+	// are mapped back to the original input bytes.
+	for _, seg := range textsafe.FoldSegments(input, false) {
+		if len(seg.Text) == 0 {
 			continue
 		}
 
-		raw := p.reg.RecognizeAll(segment)
+		raw := p.reg.RecognizeAll(seg.Text)
 		for _, m := range raw {
-			globalStart := span.Start + m.Start
-			globalEnd := span.Start + m.End
+			globalStart, globalEnd := seg.MapRange(m.Start, m.End)
 			if globalStart < 0 || globalEnd < 0 || globalStart >= globalEnd || globalEnd > len(input) {
 				continue
 			}

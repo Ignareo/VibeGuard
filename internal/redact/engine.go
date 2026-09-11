@@ -77,55 +77,66 @@ func (e *Engine) Redact(input []byte) ([]byte, int) {
 
 // RedactWithMatches scans and redacts sensitive data, returning detailed match information for this run.
 // Note: matches.Original contains the original hit content; callers that display it in the admin UI must apply privacy settings (redaction/truncation).
+//
+// Matching runs on normalized views of the input (see textsafe.FoldSegments): keywords are
+// matched against a case-folded, NFKC, zero-width-stripped view (case-insensitive), regexes
+// against the same view without case folding (to keep case-sensitive patterns working).
+// Reported/replaced ranges always refer to the original input bytes.
 func (e *Engine) RedactWithMatches(input []byte) ([]byte, []Match) {
 	var matches []Match
 
 	e.ensureKeywordMatcher()
-	spans := textsafe.RedactableSpans(input)
+
+	var kwSegs, rxSegs []textsafe.FoldedSegment
 	if e.kwAC != nil {
+		kwSegs = textsafe.FoldSegments(input, true)
 		// Rough estimate: each keyword hits ~0-1 times; preallocation reduces growth.
 		matches = make([]Match, 0, min(len(e.kwCats), 64))
 	}
+	if len(e.regex) > 0 {
+		rxSegs = textsafe.FoldSegments(input, false)
+	}
 
-	for _, span := range spans {
-		segment := input[span.Start:span.End]
-		if len(segment) == 0 {
+	for _, seg := range kwSegs {
+		if len(seg.Text) == 0 {
 			continue
 		}
 
-		if e.kwAC != nil {
-			scratchAny := e.kwScratch.Get()
-			lastEnd, _ := scratchAny.([]int)
+		scratchAny := e.kwScratch.Get()
+		lastEnd, _ := scratchAny.([]int)
 
-			e.kwAC.EachMatchNonOverlappingPerPattern(segment, lastEnd, func(id, start, end int) bool {
-				cat := ""
-				if id >= 0 && id < len(e.kwCats) {
-					cat = e.kwCats[id]
-				}
-
-				globalStart := span.Start + start
-				globalEnd := span.Start + end
-				orig := string(input[globalStart:globalEnd])
-				if e.isExcluded(orig) {
-					return true
-				}
-				matches = append(matches, Match{
-					Start:    globalStart,
-					End:      globalEnd,
-					Original: orig,
-					Category: cat,
-				})
-				return true
-			})
-
-			if lastEnd != nil {
-				e.kwScratch.Put(lastEnd)
+		e.kwAC.EachMatchNonOverlappingPerPattern(seg.Text, lastEnd, func(id, start, end int) bool {
+			cat := ""
+			if id >= 0 && id < len(e.kwCats) {
+				cat = e.kwCats[id]
 			}
-		}
 
-		// 正则也只在安全文本段内执行，避免把 ANSI/控制字节吞进去。
+			globalStart, globalEnd := seg.MapRange(start, end)
+			orig := string(input[globalStart:globalEnd])
+			if e.isExcluded(orig) {
+				return true
+			}
+			matches = append(matches, Match{
+				Start:    globalStart,
+				End:      globalEnd,
+				Original: orig,
+				Category: cat,
+			})
+			return true
+		})
+
+		if lastEnd != nil {
+			e.kwScratch.Put(lastEnd)
+		}
+	}
+
+	// 正则也只在安全文本段内执行，避免把 ANSI/控制字节吞进去。
+	for _, seg := range rxSegs {
+		if len(seg.Text) == 0 {
+			continue
+		}
 		for i, re := range e.regex {
-			locs := re.FindAllSubmatchIndex(segment, -1)
+			locs := re.FindAllSubmatchIndex(seg.Text, -1)
 			for _, loc := range locs {
 				if len(loc) < 2 {
 					continue
@@ -137,8 +148,7 @@ func (e *Engine) RedactWithMatches(input []byte) ([]byte, []Match) {
 					start, end = loc[2], loc[3]
 				}
 
-				globalStart := span.Start + start
-				globalEnd := span.Start + end
+				globalStart, globalEnd := seg.MapRange(start, end)
 				if globalStart < 0 || globalEnd < 0 || globalStart >= globalEnd || globalEnd > len(input) {
 					continue
 				}
@@ -322,7 +332,13 @@ func (e *Engine) ensureKeywordMatcher() {
 		pats := make([]string, 0, len(keys))
 		cats := make([]string, 0, len(keys))
 		for _, k := range keys {
-			pats = append(pats, k)
+			// Keywords match case-insensitively on a normalized view of the input;
+			// fold the patterns the same way (see RedactWithMatches).
+			fk := textsafe.FoldString(k, true)
+			if fk == "" {
+				continue
+			}
+			pats = append(pats, fk)
 			cats = append(cats, e.keywords[k])
 		}
 

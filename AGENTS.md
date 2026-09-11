@@ -34,7 +34,7 @@ Response path (restore): `proxy.go` ~L693 → `internal/stream` (SSE, per-event,
 | `internal/proxy` | MITM core, CONNECT, intercept modes, audit emission, config hot reload |
 | `internal/redact` / `internal/pii_next` | Legacy keyword engine / newer pipeline (rulelists + NER + keywords) |
 | `internal/promptredact` | Structured redaction of chat-API JSON bodies |
-| `internal/ahocorasick` | Keyword matcher (pure substring, case-sensitive, no normalization) |
+| `internal/ahocorasick` | Keyword matcher (pure substring engine; callers match on `textsafe.FoldSegments` views, so keyword matching is case-insensitive and resistant to zero-width/NFKC evasion) |
 | `internal/restore` / `internal/stream` | Placeholder restore (whole body / SSE streaming) |
 | `internal/session` | Placeholder mapping store, TTL, AES-GCM-encrypted WAL |
 | `internal/rulelists` | `.vgrules` parsing + HTTPS subscription manager |

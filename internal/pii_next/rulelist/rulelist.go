@@ -11,6 +11,7 @@ import (
 	"github.com/inkdust2021/vibeguard/internal/ahocorasick"
 	"github.com/inkdust2021/vibeguard/internal/config"
 	"github.com/inkdust2021/vibeguard/internal/pii_next/recognizer"
+	"github.com/inkdust2021/vibeguard/internal/textsafe"
 )
 
 type keywordRule struct {
@@ -71,23 +72,31 @@ func (r *Recognizer) Recognize(input []byte) []recognizer.Match {
 	if r.kwAC != nil && len(r.kwCats) > 0 {
 		// Rough estimate: each keyword hits ~0-1 times; preallocation reduces growth.
 		out = make([]recognizer.Match, 0, min(len(r.kwCats), 64))
-		r.kwAC.EachMatchNonOverlappingPerPattern(input, nil, func(id, start, end int) bool {
-			cat := ""
-			if id >= 0 && id < len(r.kwCats) {
-				cat = r.kwCats[id]
+		// Keywords match case-insensitively on a normalized view (zero-width stripped,
+		// NFKC, case folded); patterns were folded the same way at parse time.
+		for _, seg := range textsafe.FoldSegments(input, true) {
+			if len(seg.Text) == 0 {
+				continue
 			}
-			if cat == "" {
+			r.kwAC.EachMatchNonOverlappingPerPattern(seg.Text, nil, func(id, start, end int) bool {
+				cat := ""
+				if id >= 0 && id < len(r.kwCats) {
+					cat = r.kwCats[id]
+				}
+				if cat == "" {
+					return true
+				}
+				ms, me := seg.MapRange(start, end)
+				out = append(out, recognizer.Match{
+					Start:    ms,
+					End:      me,
+					Category: cat,
+					Priority: r.priority,
+					Source:   r.Name(),
+				})
 				return true
-			}
-			out = append(out, recognizer.Match{
-				Start:    start,
-				End:      end,
-				Category: cat,
-				Priority: r.priority,
-				Source:   r.Name(),
 			})
-			return true
-		})
+		}
 	} else {
 		out = nil
 	}
@@ -229,7 +238,12 @@ func Parse(r io.Reader, opts ParseOptions) (*Recognizer, error) {
 			if kw.text == "" || kw.cat == "" {
 				continue
 			}
-			pats = append(pats, kw.text)
+			// Fold keyword patterns the same way Recognize folds the input.
+			pat := textsafe.FoldString(kw.text, true)
+			if pat == "" {
+				continue
+			}
+			pats = append(pats, pat)
 			cats = append(cats, kw.cat)
 		}
 		out.kwAC = ahocorasick.New(pats)
