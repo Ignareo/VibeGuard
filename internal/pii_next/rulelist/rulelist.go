@@ -23,19 +23,22 @@ type keywordRule struct {
 //
 // Rule format (parsed line-by-line; blank/comment lines are ignored):
 // - keyword <CATEGORY> <TEXT...>
-// - regex   <CATEGORY> <RE2_PATTERN...>
+// - regex   <CATEGORY> <RE2_PATTERN...> [:: <VALIDATOR>]
 //
 // Comment lines start with #, //, ;, or ! (after trimming leading whitespace).
 // CATEGORY is normalized to [A-Z0-9_]; TEXT strips invisible characters and trims whitespace.
+// A regex rule may end with `:: <VALIDATOR>` (luhn / china_id / uscc); the validator
+// runs on the captured text and failed matches are discarded.
 type Recognizer struct {
 	name     string
 	priority int
 
-	keywords []keywordRule
-	kwAC     *ahocorasick.Matcher
-	kwCats   []string
-	regex    []*regexp.Regexp
-	regexCat []string
+	keywords   []keywordRule
+	kwAC       *ahocorasick.Matcher
+	kwCats     []string
+	regex      []*regexp.Regexp
+	regexCat   []string
+	regexValid []Validator
 }
 
 func (r *Recognizer) Name() string {
@@ -105,6 +108,10 @@ func (r *Recognizer) Recognize(input []byte) []recognizer.Match {
 		if re == nil {
 			continue
 		}
+		var valid Validator
+		if i >= 0 && i < len(r.regexValid) {
+			valid = r.regexValid[i]
+		}
 		locs := re.FindAllSubmatchIndex(input, -1)
 		for _, loc := range locs {
 			if len(loc) < 2 {
@@ -116,6 +123,9 @@ func (r *Recognizer) Recognize(input []byte) []recognizer.Match {
 				start, end = loc[2], loc[3]
 			}
 			if start < 0 || end < 0 || start >= end || end > len(input) {
+				continue
+			}
+			if valid != nil && !valid(string(input[start:end])) {
 				continue
 			}
 			cat := ""
@@ -216,12 +226,26 @@ func Parse(r io.Reader, opts ParseOptions) (*Recognizer, error) {
 			if pat == "" {
 				return nil, fmt.Errorf("规则列表第 %d 行：regex PATTERN 为空", lineNo)
 			}
+			var valid Validator
+			if idx := strings.LastIndex(pat, " :: "); idx >= 0 {
+				name := strings.TrimSpace(pat[idx+4:])
+				pat = strings.TrimSpace(pat[:idx])
+				if pat == "" {
+					return nil, fmt.Errorf("规则列表第 %d 行：regex PATTERN 为空", lineNo)
+				}
+				v, err := lookupValidator(name)
+				if err != nil {
+					return nil, fmt.Errorf("规则列表第 %d 行：%w", lineNo, err)
+				}
+				valid = v
+			}
 			re, err := regexp.Compile(pat)
 			if err != nil {
 				return nil, fmt.Errorf("规则列表第 %d 行：regex 编译失败：%w", lineNo, err)
 			}
 			out.regex = append(out.regex, re)
 			out.regexCat = append(out.regexCat, cat)
+			out.regexValid = append(out.regexValid, valid)
 
 		default:
 			return nil, fmt.Errorf("规则列表第 %d 行：未知规则类型：%q", lineNo, kind)

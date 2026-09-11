@@ -4,8 +4,11 @@
 # Subscribe via the default config or download manually.
 #
 # Format:
-#   keyword <CATEGORY> <TEXT...>     — exact substring match (case-sensitive)
-#   regex   <CATEGORY> <PATTERN...>  — Go RE2 regex; first capture group is replaced if present
+#   keyword <CATEGORY> <TEXT...>     — substring match on normalized text (case-insensitive)
+#   regex   <CATEGORY> <PATTERN...> [:: <VALIDATOR>]
+#                                      Go RE2 regex; first capture group is replaced if present.
+#                                      Optional validator (luhn / china_id / uscc) verifies the
+#                                      captured text's checksum; failed matches are discarded.
 #
 # Categories are normalized to [A-Z0-9_].
 
@@ -31,8 +34,14 @@ regex PHONE (?i)(?:phone|tel|mobile|fax)\s*[:=]\s*(\+?\d[\d\s().-]{7,20}\d)
 # National IDs
 # =============================================================================
 
-# China National ID (18 digits, last may be X)
-regex CHINA_ID (?:^|\D)(\d{17}[\dXx])(?:$|\D)
+# China National ID (18 digits, last may be X; checksum-verified)
+regex CHINA_ID (?:^|\D)(\d{17}[\dXx])(?:$|\D) :: china_id
+
+# China passport (prefix letter E/G/P/S/D + 8 digits)
+regex CHINA_PASSPORT (?i)(?:^|[^a-z0-9])([egpsd]\d{8})(?:$|[^a-z0-9])
+
+# Unified Social Credit Code (18 chars, checksum-verified)
+regex USCC (?:^|[^0-9A-Za-z])([0-9A-HJ-NPQRTUWXY]{18})(?:$|[^0-9A-Za-z]) :: uscc
 
 # US Social Security Number
 regex SSN (?:^|\D)(\d{3}-\d{2}-\d{4})(?:$|\D)
@@ -41,11 +50,14 @@ regex SSN (?:^|\D)(\d{3}-\d{2}-\d{4})(?:$|\D)
 # Financial
 # =============================================================================
 
-# Credit card (16 digits, grouped)
-regex CREDIT_CARD (?:^|[^0-9])(\d{4}[- ]?\d{4}[- ]?\d{4}[- ]?\d{4})(?:$|[^0-9])
+# Credit card (16 digits, grouped; Luhn-verified)
+regex CREDIT_CARD (?:^|[^0-9])(\d{4}[- ]?\d{4}[- ]?\d{4}[- ]?\d{4})(?:$|[^0-9]) :: luhn
 
-# Credit card (Amex: 4-6-5)
-regex CREDIT_CARD (?:^|[^0-9])(\d{4}[- ]?\d{6}[- ]?\d{5})(?:$|[^0-9])
+# Credit card (Amex: 4-6-5; Luhn-verified)
+regex CREDIT_CARD (?:^|[^0-9])(\d{4}[- ]?\d{6}[- ]?\d{5})(?:$|[^0-9]) :: luhn
+
+# Bank card (16-19 digits incl. debit cards; Luhn-verified)
+regex BANK_CARD (?:^|\D)(\d{16,19})(?:$|\D) :: luhn
 
 # IBAN (international bank account)
 regex IBAN (?i)(?:^|[^a-z0-9])([a-z]{2}\d{2}(?:\s?[a-z0-9]){11,30})(?:$|[^a-z0-9])

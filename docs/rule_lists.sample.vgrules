@@ -5,12 +5,14 @@
 #
 # Rule formats:
 #   keyword <CATEGORY> <TEXT...>
-#   regex   <CATEGORY> <RE2_PATTERN...>
+#   regex   <CATEGORY> <RE2_PATTERN...> [:: <VALIDATOR>]
 #
 # Notes:
 # - CATEGORY is normalized to [A-Z0-9_]
-# - keyword is an exact substring match (case-sensitive)
+# - keyword is a substring match on normalized text (case-insensitive, zero-width stripped, NFKC)
 # - regex uses Go RE2 syntax; if capturing groups exist, VibeGuard will replace the first group (safer)
+# - a regex rule may end with `:: <VALIDATOR>` (luhn / china_id / uscc); the captured text's
+#   checksum is verified and failed matches are discarded
 
 # --- keyword: best for fixed tokens (names / codenames / org names) ---
 keyword PERSON John Doe
@@ -39,10 +41,9 @@ regex SSN (?:^|\D)(\d{3}-\d{2}-\d{4})(?:$|\D)
 # IBAN (format only; no checksum; allows spaces)
 regex IBAN (?i)(?:^|[^a-z0-9])([a-z]{2}\d{2}(?:\s?[a-z0-9]){11,30})(?:$|[^a-z0-9])
 
-# Credit card number (format only; no Luhn; prefer tightening with context)
-regex CREDIT_CARD (?:^|[^0-9])(\d{13,19})(?:$|[^0-9])
-regex CREDIT_CARD (?:^|[^0-9])(\d{4}[- ]?\d{4}[- ]?\d{4}[- ]?\d{4})(?:$|[^0-9])
-regex CREDIT_CARD (?:^|[^0-9])(\d{4}[- ]?\d{6}[- ]?\d{5})(?:$|[^0-9])
+# Credit card number (Luhn checksum via validator)
+regex CREDIT_CARD (?:^|[^0-9])(\d{4}[- ]?\d{4}[- ]?\d{4}[- ]?\d{4})(?:$|[^0-9]) :: luhn
+regex CREDIT_CARD (?:^|[^0-9])(\d{4}[- ]?\d{6}[- ]?\d{5})(?:$|[^0-9]) :: luhn
 
 # MAC address (colon/dash separated)
 regex MAC (?i)(?:^|[^0-9a-f])((?:[0-9a-f]{2}[:-]){5}[0-9a-f]{2})(?:$|[^0-9a-f])
@@ -54,5 +55,5 @@ regex CRYPTO (?i)(?:^|[^0-9a-f])(0x[0-9a-f]{40})(?:$|[^0-9a-f])
 # Use a capturing group to replace only the value (avoid replacing the parameter name)
 regex API_KEY (?i)api[_-]?key=([^&\s]{8,128})
 
-# China National ID (format only; no checksum)
-regex CHINA_ID \d{17}[\dXx]
+# China National ID (checksum-verified via validator)
+regex CHINA_ID (?:^|\D)(\d{17}[\dXx])(?:$|\D) :: china_id

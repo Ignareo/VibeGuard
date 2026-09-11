@@ -62,6 +62,24 @@ patterns:
     min_score: 0.5
 ```
 
+### Chinese (zh) deployment
+
+`language: "auto"` currently resolves to `en` before calling Presidio. To recognize
+Chinese PII, set `language: "zh"` explicitly — the value is passed through to Presidio's
+`/analyze` as-is. Your Presidio Analyzer deployment must include a Chinese-capable NLP
+model, for example:
+
+```dockerfile
+FROM mcr.microsoft.com/presidio-analyzer:latest
+RUN pip install --no-cache-dir jieba && \
+    python -m spacy download zh_core_web_sm
+```
+
+and configure Presidio's recognizer registry to use `zh_core_web_sm` (plus optionally
+`jieba`-based recognizers for `PERSON`/`ORG`/`LOCATION`). If the server only has an
+English model, requests with `language: "zh"` return an error and VibeGuard falls back
+to rule-list/keyword detection only.
+
 ---
 
 ## Development & Debugging
