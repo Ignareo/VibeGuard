@@ -30,4 +30,27 @@ See [`rule_lists.sample.vgrules`](rule_lists.sample.vgrules) for a complete exam
 
 | Name | URL | Description |
 |------|-----|-------------|
-| Default Rules | `https://raw.githubusercontent.com/inkdust2021/vgrules/refs/heads/main/default.vgrules` | Built-in rules: email, phone, IP, UUID, SSN, IBAN, credit card, MAC, crypto addresses, API keys, China national ID, and more. |
+| Default Rules | `https://raw.githubusercontent.com/Ignareo/VibeGuard/refs/heads/main/internal/defaultrules/default.vgrules` | Built-in rules: email, phone, IP, UUID, SSN, IBAN, credit card (Luhn), bank card (Luhn), MAC, crypto addresses, API keys, China national ID (checksum), China passport, USCC (checksum), and more. |
+
+## Subscription integrity (sha256_pin)
+
+Remote subscriptions are fetched over HTTPS and validated by parsing, but HTTPS alone does
+not stop a compromised rule source from pushing malicious rules. Add `sha256_pin` to a
+`rule_lists` entry to pin the content hash:
+
+```yaml
+patterns:
+  rule_lists:
+    - name: my-rules
+      url: https://example.com/rules.vgrules
+      sha256_pin: tofu        # or a 64-char hex sha256 of the expected content
+      enabled: true
+```
+
+- `tofu` — trust on first use: the first accepted content hash is recorded (in the
+  subscription meta as `pinned_sha256`) and later mismatches are rejected.
+- 64-char hex — the content sha256 must match exactly.
+
+Rejected updates keep the existing local cache, set `last_error` in the subscription meta
+(shown in the admin UI), and log a warning. To accept a legitimate upstream change, update
+the pin to the new hash or clear `pinned_sha256` in the subscription meta file.

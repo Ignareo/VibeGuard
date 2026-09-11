@@ -32,12 +32,12 @@ Response path (restore): `proxy.go` ~L693 → `internal/stream` (SSE, per-event,
 |---|---|
 | `cmd/vibeguard` | CLI (cobra): start/stop/run/`<assistant>`/init/trust/test/version |
 | `internal/proxy` | MITM core, CONNECT, intercept modes, audit emission, config hot reload |
-| `internal/redact` / `internal/pii_next` | Legacy keyword engine / newer pipeline (rulelists + NER + keywords) |
+| `internal/redact` / `internal/pii_next` | Legacy keyword engine / newer pipeline (rulelists with `:: luhn/china_id/uscc` checksum validators + NER + keywords) |
 | `internal/promptredact` | Structured redaction of chat-API JSON bodies |
 | `internal/ahocorasick` | Keyword matcher (pure substring engine; callers match on `textsafe.FoldSegments` views, so keyword matching is case-insensitive and resistant to zero-width/NFKC evasion) |
 | `internal/restore` / `internal/stream` | Placeholder restore (whole body / SSE streaming) |
 | `internal/session` | Placeholder mapping store, TTL, AES-GCM-encrypted WAL |
-| `internal/rulelists` | `.vgrules` parsing + HTTPS subscription manager |
+| `internal/rulelists` | HTTPS subscription manager (optional `sha256_pin` / TOFU content pinning) |
 | `internal/defaultrules` | Built-in `default.vgrules` |
 | `internal/secretsources` | Import secrets from dotenv/lines files as keywords |
 | `internal/admin` + `internal/auditdb` | Admin UI/API (bcrypt auth), in-memory + optional SQLite audit (build tag `vibeguard_full`) |

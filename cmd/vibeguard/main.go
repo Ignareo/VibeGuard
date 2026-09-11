@@ -1070,6 +1070,13 @@ log:
 	  #   - path: .env
 	  #     format: dotenv
 	  #     enabled: true
+	  # Optional: remote rule-list subscriptions (.vgrules). sha256_pin pins the content
+	  # hash against poisoning: "tofu" (trust-on-first-use) or a 64-char hex sha256.
+	  # rule_lists:
+	  #   - name: my-rules
+	  #     url: https://example.com/rules.vgrules
+	  #     sha256_pin: tofu
+	  #     enabled: true
 	`
 
 	cfgTemplateEn := `# VibeGuard Configuration
@@ -1123,6 +1130,13 @@ patterns:
   # secret_files:
   #   - path: .env
   #     format: dotenv
+  #     enabled: true
+  # Optional: remote rule-list subscriptions (.vgrules). sha256_pin pins the content
+  # hash against poisoning: "tofu" (trust-on-first-use) or a 64-char hex sha256.
+  # rule_lists:
+  #   - name: my-rules
+  #     url: https://example.com/rules.vgrules
+  #     sha256_pin: tofu
   #     enabled: true
 `
 

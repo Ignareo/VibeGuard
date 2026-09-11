@@ -81,6 +81,11 @@ type RuleListConfig struct {
 	UpdateInterval string `yaml:"update_interval" json:"update_interval"`
 	// AllowHTTP allows http:// subscriptions when true (unsafe; default only allows https://).
 	AllowHTTP bool `yaml:"allow_http" json:"allow_http"`
+	// SHA256Pin pins the subscription content hash (URL mode only) to defeat rule-list poisoning:
+	// - empty: no pinning (HTTPS only)
+	// - "tofu": trust-on-first-use; the first accepted content hash is pinned and later mismatches are rejected
+	// - 64-char hex: the content sha256 must match exactly, otherwise the update is rejected
+	SHA256Pin string `yaml:"sha256_pin" json:"sha256_pin"`
 	// Enabled controls whether this rule list participates in matching.
 	Enabled bool `yaml:"enabled" json:"enabled"`
 	// Priority controls priority (1~99); higher wins on overlaps.
@@ -153,6 +158,16 @@ type AuditDBConfig struct {
 	PersistRawValues bool `yaml:"persist_raw_values"`
 }
 
+// DefaultRuleListURL is the default rule-list subscription, served from this fork
+// (raw view of the embedded default.vgrules) so rule updates stay under this project's control.
+const DefaultRuleListURL = "https://raw.githubusercontent.com/Ignareo/VibeGuard/refs/heads/main/internal/defaultrules/default.vgrules"
+
+// legacyDefaultRuleListURLs are upstream default subscription URLs migrated to DefaultRuleListURL on load.
+var legacyDefaultRuleListURLs = map[string]struct{}{
+	"https://raw.githubusercontent.com/inkdust2021/vgrules/main/default.vgrules":            {},
+	"https://raw.githubusercontent.com/inkdust2021/vgrules/refs/heads/main/default.vgrules": {},
+}
+
 // Default configuration values
 var defaultConfig = Config{
 	Proxy: ProxyConfig{
@@ -172,9 +187,9 @@ var defaultConfig = Config{
 			{
 				ID:   "vibeguard-default",
 				Name: "VibeGuard Default Rules",
-				// Remote subscription (default rule set): maintained by the project and updated periodically by update_interval.
+				// Remote subscription (default rule set): shipped with this fork and updated periodically by update_interval.
 				// Note: a GitHub blob URL is acceptable; it will be normalized to a raw URL at runtime.
-				URL:      "https://raw.githubusercontent.com/inkdust2021/vgrules/refs/heads/main/default.vgrules",
+				URL:      DefaultRuleListURL,
 				Enabled:  true,
 				Priority: 50,
 			},
@@ -508,14 +523,17 @@ func sanitizeLoadedConfig(cfg *Config) {
 			if path == "" && url == "" {
 				continue
 			}
-			// Backward-compat: migrate the default subscription URL only when it still uses the old default value (avoid overwriting user customizations).
-			if strings.TrimSpace(rl.ID) == "vibeguard-default" && strings.TrimSpace(url) == "https://raw.githubusercontent.com/inkdust2021/vgrules/main/default.vgrules" {
-				url = "https://raw.githubusercontent.com/inkdust2021/vgrules/refs/heads/main/default.vgrules"
+			// Backward-compat: migrate the default subscription URL only when it still uses an old default value (avoid overwriting user customizations).
+			if strings.TrimSpace(rl.ID) == "vibeguard-default" {
+				if _, legacy := legacyDefaultRuleListURLs[url]; legacy {
+					url = DefaultRuleListURL
+				}
 			}
 			id := SanitizePatternValue(rl.ID)
 			name := SanitizePatternValue(rl.Name)
 			updateInterval := strings.TrimSpace(rl.UpdateInterval)
 			allowHTTP := rl.AllowHTTP
+			sha256Pin := strings.ToLower(strings.TrimSpace(rl.SHA256Pin))
 			if url != "" && updateInterval == "" {
 				updateInterval = "24h"
 			}
@@ -549,6 +567,7 @@ func sanitizeLoadedConfig(cfg *Config) {
 				// Applies to URL mode only; Path mode keeps the value but does not use it.
 				UpdateInterval: updateInterval,
 				AllowHTTP:      allowHTTP,
+				SHA256Pin:      sha256Pin,
 				Enabled:        rl.Enabled,
 				Priority:       priority,
 			})

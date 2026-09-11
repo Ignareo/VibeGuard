@@ -29,10 +29,12 @@ type RuleListItem struct {
 	Exists   bool   `json:"exists"`
 
 	// Subscription-only fields (for displaying subscription health in the admin UI).
-	Verified  bool   `json:"verified,omitempty"`
-	LastError string `json:"last_error,omitempty"`
-	CheckedAt int64  `json:"checked_at,omitempty"`
-	UpdatedAt int64  `json:"updated_at,omitempty"`
+	Verified   bool   `json:"verified,omitempty"`
+	LastError  string `json:"last_error,omitempty"`
+	CheckedAt  int64  `json:"checked_at,omitempty"`
+	UpdatedAt  int64  `json:"updated_at,omitempty"`
+	SHA256Pin  string `json:"sha256_pin,omitempty"`
+	PinnedHash string `json:"pinned_hash,omitempty"`
 }
 
 type RuleListsResponse struct {
@@ -52,6 +54,7 @@ type subscribeRuleListRequest struct {
 	URL            string `json:"url"`
 	UpdateInterval string `json:"update_interval"`
 	AllowHTTP      bool   `json:"allow_http"`
+	SHA256Pin      string `json:"sha256_pin"`
 
 	Name     string `json:"name"`
 	Enabled  *bool  `json:"enabled"`
@@ -115,6 +118,7 @@ func (a *Admin) handleRuleListsSubscribe(w http.ResponseWriter, r *http.Request)
 		URL:            config.SanitizePatternValue(urlStr),
 		UpdateInterval: strings.TrimSpace(req.UpdateInterval),
 		AllowHTTP:      req.AllowHTTP,
+		SHA256Pin:      strings.ToLower(strings.TrimSpace(req.SHA256Pin)),
 		Enabled:        enabled,
 		Priority:       priority,
 	}
@@ -155,14 +159,15 @@ func (a *Admin) handleRuleListsSubscribe(w http.ResponseWriter, r *http.Request)
 	}
 
 	item := RuleListItem{
-		ID:       rl.ID,
-		Name:     rl.Name,
-		URL:      rl.URL,
-		Kind:     "subscription",
-		Enabled:  rl.Enabled,
-		Priority: rl.Priority,
-		Exists:   exists,
-		Verified: strings.TrimSpace(meta.LastError) == "" && strings.TrimSpace(meta.ContentSHA256) != "",
+		ID:        rl.ID,
+		Name:      rl.Name,
+		URL:       rl.URL,
+		Kind:      "subscription",
+		Enabled:   rl.Enabled,
+		Priority:  rl.Priority,
+		Exists:    exists,
+		Verified:  strings.TrimSpace(meta.LastError) == "" && strings.TrimSpace(meta.ContentSHA256) != "",
+		SHA256Pin: rl.SHA256Pin,
 		LastError: func() string {
 			return strings.TrimSpace(meta.LastError)
 		}(),
@@ -343,6 +348,7 @@ func (a *Admin) getRuleLists(w http.ResponseWriter, r *http.Request) {
 
 		if urlStr != "" {
 			item.Kind = "subscription"
+			item.SHA256Pin = rl.SHA256Pin
 			if rp, ok := rulelists.SubscriptionRulesPath(rl); ok {
 				if _, err := os.Stat(rp); err == nil {
 					item.Exists = true
@@ -354,6 +360,7 @@ func (a *Admin) getRuleLists(w http.ResponseWriter, r *http.Request) {
 					item.LastError = strings.TrimSpace(meta.LastError)
 					item.CheckedAt = meta.CheckedAt
 					item.UpdatedAt = meta.UpdatedAt
+					item.PinnedHash = meta.PinnedSHA256
 				}
 			}
 		} else {

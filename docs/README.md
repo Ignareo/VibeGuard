@@ -17,15 +17,17 @@ Admin UI entry:
 
 Rule files are parsed line by line. Blank lines and comment lines are ignored (starting with `#`, `//`, `;`, or `!`).
 
-- `keyword <CATEGORY> <TEXT...>`: exact string match (case-sensitive)
-- `regex   <CATEGORY> <RE2_PATTERN...>`: Go RE2 regex match  
-  If the regex contains capture groups, VibeGuard replaces the **first capture group** range first (safer, avoids redacting parameter names together with values).
+- `keyword <CATEGORY> <TEXT...>`: substring match on normalized text (case-insensitive, zero-width characters stripped, NFKC-folded)
+- `regex   <CATEGORY> <RE2_PATTERN...> [:: <VALIDATOR>]`: Go RE2 regex match  
+  If the regex contains capture groups, VibeGuard replaces the **first capture group** range first (safer, avoids redacting parameter names together with values).  
+  An optional `:: <VALIDATOR>` suffix (`luhn` / `china_id` / `uscc`) verifies the captured text's checksum and discards failed matches.
 
 Sample file: `docs/rule_lists.sample.vgrules`
 
 ### Subscriptions
 
 Rule list subscriptions only require a URL. VibeGuard still enforces basic safety checks (size limit, text parsing/regex compilation) and caches the fetched content locally.
+Subscriptions support optional content pinning (`sha256_pin: tofu` or a hex sha256) to reject tampered rule updates — see `docs/RULE_LISTS.md`.
 
 Subscription cache directory: `~/.vibeguard/rules/subscriptions/`
 

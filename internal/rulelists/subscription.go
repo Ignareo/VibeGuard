@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"os"
@@ -42,6 +43,9 @@ type SubscriptionMeta struct {
 	// VerifiedSHA256 is a legacy field name (easy to confuse with "verified"); kept for backward compatibility with older meta files.
 	// New code should prefer ContentSHA256.
 	VerifiedSHA256 string `json:"verified_sha256,omitempty"`
+	// PinnedSHA256 is the trust-on-first-use pin recorded when sha256_pin: tofu is configured.
+	// Once set, subscription updates whose content hash differs are rejected.
+	PinnedSHA256 string `json:"pinned_sha256,omitempty"`
 
 	Bytes     int    `json:"bytes,omitempty"`
 	LastError string `json:"last_error,omitempty"`
@@ -247,6 +251,7 @@ func SyncSubscriptionIfDue(ctx context.Context, rl config.RuleListConfig, opts S
 		meta.LastModified = ""
 		meta.ContentSHA256 = ""
 		meta.VerifiedSHA256 = ""
+		meta.PinnedSHA256 = ""
 		meta.Bytes = 0
 	}
 
@@ -374,6 +379,15 @@ func SyncSubscriptionIfDue(ctx context.Context, rl config.RuleListConfig, opts S
 		return false, meta, err
 	}
 
+	// Integrity pinning (anti-poisoning): reject tampered content before it can overwrite the cache.
+	if err := checkSubscriptionPin(rl.SHA256Pin, sumHex, prev.PinnedSHA256, &meta); err != nil {
+		slog.Warn("订阅内容校验失败，已拒绝更新", "url", meta.URL, "error", err)
+		meta.CheckedAt = now.Unix()
+		meta.LastError = err.Error()
+		_ = SaveSubscriptionMeta(metaPath, meta)
+		return false, meta, err
+	}
+
 	// At this point the content is accepted: persist the fingerprint and conditional request headers.
 	meta.ContentSHA256 = sumHex
 	if respETag != "" {
@@ -401,6 +415,56 @@ func SyncSubscriptionIfDue(ctx context.Context, rl config.RuleListConfig, opts S
 	meta.LastError = ""
 	_ = SaveSubscriptionMeta(metaPath, meta)
 	return true, meta, nil
+}
+
+// checkSubscriptionPin enforces the sha256_pin integrity setting before new content
+// may overwrite the local cache. pin comes from config; prevPinned is the TOFU pin
+// recorded in the subscription meta. On TOFU first use, meta.PinnedSHA256 is set.
+func checkSubscriptionPin(pin, sumHex, prevPinned string, meta *SubscriptionMeta) error {
+	pin = strings.ToLower(strings.TrimSpace(pin))
+	if pin == "" {
+		return nil
+	}
+	if pin == "tofu" {
+		pinned := strings.ToLower(strings.TrimSpace(prevPinned))
+		if pinned == "" {
+			// Trust on first use: pin to the first accepted content.
+			meta.PinnedSHA256 = sumHex
+			return nil
+		}
+		if pinned != sumHex {
+			return fmt.Errorf("订阅内容 sha256 (%s) 与 TOFU 钉扎值 (%s) 不匹配，已拒绝更新；如确认上游变更合法，请将 sha256_pin 改为该哈希或删除订阅缓存后重试", shortHash(sumHex), shortHash(pinned))
+		}
+		return nil
+	}
+	if !isSHA256Hex(pin) {
+		return fmt.Errorf("sha256_pin 格式非法（应为 64 位十六进制或 tofu）：%q", pin)
+	}
+	if pin != sumHex {
+		return fmt.Errorf("订阅内容 sha256 (%s) 与 sha256_pin (%s) 不匹配，已拒绝更新；疑似订阅被篡改", shortHash(sumHex), shortHash(pin))
+	}
+	return nil
+}
+
+func isSHA256Hex(s string) bool {
+	if len(s) != 64 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+func shortHash(s string) string {
+	s = strings.TrimSpace(s)
+	if len(s) > 12 {
+		return s[:12] + "…"
+	}
+	return s
 }
 
 func validateRemoteURL(raw string, allowHTTP bool) error {
