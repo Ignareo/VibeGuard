@@ -27,19 +27,19 @@ type StatsCollector struct {
 
 // Admin handles the web UI HTTP endpoints
 type Admin struct {
-	config   *config.Manager
-	session  *session.Manager
-	ca       *cert.CA
-	certPath string
-	keyPath  string
-	stats    *StatsCollector
-	started  atomic.Int64 // Unix timestamp
-	audit    *AuditStore
-	auditDB  *auditdb.Store
+	config    *config.Manager
+	session   *session.Manager
+	ca        *cert.CA
+	certPath  string
+	keyPath   string
+	stats     *StatsCollector
+	started   atomic.Int64 // Unix timestamp
+	audit     *AuditStore
+	auditDB   *auditdb.Store
 	stopPurge func()
-	debug    *DebugStore
-	auth     *AuthManager
-	meta     *metaAuditLog
+	debug     *DebugStore
+	auth      *AuthManager
+	meta      *metaAuditLog
 
 	// Login brute-force protection: consecutive failures trigger a temporary lockout.
 	loginMu          sync.Mutex
@@ -204,7 +204,7 @@ func (a *Admin) persistRawAuditValues() bool {
 	if a == nil || a.config == nil {
 		return false
 	}
-	return a.config.Get().AuditDB.PersistRawValues
+	return a.config.Get().AuditDB.PersistRawValuesEnabled()
 }
 
 // updateConfig applies fn to the config and persists it, recording a meta-audit entry on

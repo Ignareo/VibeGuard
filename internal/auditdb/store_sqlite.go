@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -57,7 +58,9 @@ func Open(path string) (*Store, error) {
 		return nil, fmt.Errorf("auditdb: create dir: %w", err)
 	}
 
-	db, err := sql.Open("sqlite", path+"?_journal_mode=WAL&_busy_timeout=5000")
+	// modernc.org/sqlite only honors _pragma= query parameters; the classic
+	// _journal_mode=/_busy_timeout= keys are silently ignored by the driver.
+	db, err := sql.Open("sqlite", path+"?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)")
 	if err != nil {
 		return nil, fmt.Errorf("auditdb: open: %w", err)
 	}
@@ -66,6 +69,17 @@ func Open(path string) (*Store, error) {
 	if _, err := db.Exec(schema); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("auditdb: schema: %w", err)
+	}
+
+	// Fail loudly if WAL mode did not stick (exotic filesystems may reject it):
+	// busy_timeout without WAL gives much weaker concurrency than intended.
+	var journalMode string
+	if err := db.QueryRow(`PRAGMA journal_mode`).Scan(&journalMode); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("auditdb: read journal_mode: %w", err)
+	}
+	if !strings.EqualFold(journalMode, "wal") {
+		slog.Warn("SQLite audit DB is not in WAL journal mode", "path", path, "journal_mode", journalMode)
 	}
 
 	// The database file may contain previews of sensitive matches; never leave it
@@ -99,9 +113,10 @@ func Open(path string) (*Store, error) {
 	return &Store{db: db, path: path, insertStmt: ins, updateStmt: upd}, nil
 }
 
-// chmodPrivateDBFiles tightens permissions on the database and its WAL/SHM sidecars.
+// chmodPrivateDBFiles tightens permissions on the database and its journal sidecars
+// (-wal/-shm in WAL mode, -journal in rollback modes).
 func chmodPrivateDBFiles(path string) error {
-	for _, p := range []string{path, path + "-wal", path + "-shm"} {
+	for _, p := range []string{path, path + "-wal", path + "-shm", path + "-journal"} {
 		if err := os.Chmod(p, 0600); err != nil {
 			if os.IsNotExist(err) {
 				continue
