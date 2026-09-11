@@ -430,9 +430,10 @@ func redactJSONTextPart(redactEng redact.Redactor, v any) (out any, matches []re
 		var all []redact.Match
 
 		if t, ok := vv["text"]; ok {
-			if ts, ok := t.(string); ok && isSystemReminderText(ts) {
-				return vv, nil, false, nil
-			}
+			// Note: text parts starting with <system-reminder> are NOT exempt from
+			// redaction. Claude Code / Kimi Code use them to inject file contents, which
+			// is exactly where secrets end up; the upstream API treats the reminder as
+			// plain text, so redacting it cannot break harness-side parsing.
 			nt, ms, ch, err := redactJSONStringLike(redactEng, t)
 			if err != nil {
 				return v, nil, false, err
@@ -508,15 +509,4 @@ func redactJSONTextPart(redactEng redact.Redactor, v any) (out any, matches []re
 	default:
 		return v, nil, false, nil
 	}
-}
-
-func isSystemReminderText(s string) bool {
-	t := strings.TrimSpace(s)
-	if t == "" {
-		return false
-	}
-	if !strings.HasPrefix(t, "<system-reminder") {
-		return false
-	}
-	return strings.Contains(t, "</system-reminder>")
 }

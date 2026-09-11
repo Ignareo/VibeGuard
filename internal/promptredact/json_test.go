@@ -160,6 +160,17 @@ func TestRedactJSONBodyGemini(t *testing.T) {
 	}
 }
 
+func TestRedactJSONBodySystemReminderNotExempt(t *testing.T) {
+	// Claude Code / Kimi Code inject file contents via <system-reminder> text parts;
+	// secrets inside them must be redacted like anywhere else.
+	body := `{"messages":[{"role":"user","content":[{"type":"text","text":"<system-reminder>\nfile contents: ` + testSecret + `\n</system-reminder>"}]}]}`
+	out, matches, changed, err := RedactJSONBody(newTestEngine(t), []byte(body))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	assertRedacted(t, body, out, changed, matches)
+}
+
 func TestRedactJSONBodyNoSecrets(t *testing.T) {
 	body := `{"model":"gpt-4o","messages":[{"role":"user","content":"hello"}]}`
 	out, matches, changed, err := RedactJSONBody(newTestEngine(t), []byte(body))
