@@ -47,6 +47,9 @@ const (
 	maxTextBodyBytes          = 10 * 1024 * 1024 // 10MB
 	defaultPlaceholderPrefix  = "__VG_"
 	defaultProxyInterceptMode = "global"
+
+	invalidJSONPolicyPartial = "partial"
+	invalidJSONPolicyBlock   = "block"
 )
 
 var errUnsupportedContentEncoding = errors.New("unsupported content-encoding")
@@ -57,6 +60,7 @@ type runtimeConfig struct {
 	redactEng              redact.Redactor
 	restoreEng             *restore.Engine
 	websocketRedactionBeta bool
+	invalidJSONPolicy      string
 }
 
 // Server represents the MITM proxy server
@@ -614,23 +618,44 @@ func (s *Server) setupHandlers() {
 				redacted, matches = rt.redactEng.RedactWithMatches(body)
 			}
 
+			outBody := body
+			usedRedacted := false
+			if len(matches) > 0 {
+				outBody = redacted
+				usedRedacted = true
+			}
+			// Safety fallback: if whole-text redaction broke a previously valid JSON body,
+			// do NOT revert to the original body (that would forward every detected secret
+			// in clear). Retry at match granularity, dropping only the matches whose
+			// replacement invalidates the JSON structure.
+			if usedRedacted && strings.Contains(contentType, "application/json") && json.Valid(body) && !json.Valid(outBody) {
+				fixed, applied, dropped := reapplyMatchesPreservingJSON(body, matches)
+				slog.Warn("Whole-text redaction corrupted JSON request body; dropped JSON-breaking matches instead of forwarding the original body",
+					"host", host, "applied", len(applied), "dropped", len(dropped), "dropped_categories", matchCategories(dropped))
+				outBody = fixed
+				matches = applied
+				usedRedacted = len(applied) > 0
+				auditEv.Note = "invalid_json_partial"
+
+				if len(dropped) > 0 && rt.invalidJSONPolicy == invalidJSONPolicyBlock {
+					auditEv.RedactedCount = len(applied)
+					if len(applied) > 0 {
+						auditEv.Matches = buildAuditMatches(s.config.Get().Log.RedactLog, applied)
+					}
+					auditEv.Note = "invalid_json_blocked"
+					recordAudit()
+					stats.Errors.Add(1)
+					slog.Warn("Blocked request: redaction would corrupt JSON and proxy.invalid_json_policy=block",
+						"host", host, "dropped", len(dropped), "dropped_categories", matchCategories(dropped))
+					return req, goproxy.NewResponse(req, goproxy.ContentTypeText, http.StatusBadGateway,
+						"VibeGuard blocked this request: redacting detected sensitive data would corrupt the JSON body (proxy.invalid_json_policy=block).\n")
+				}
+			}
+
 			count := len(matches)
 			auditEv.RedactedCount = count
 			if count > 0 {
 				auditEv.Matches = buildAuditMatches(s.config.Get().Log.RedactLog, matches)
-			}
-
-			outBody := body
-			usedRedacted := false
-			if count > 0 {
-				outBody = redacted
-				usedRedacted = true
-			}
-			// Compatibility fallback: if whole-text redaction broke valid JSON, revert to the original body to avoid upstream parse failures.
-			if usedRedacted && strings.Contains(contentType, "application/json") && json.Valid(body) && !json.Valid(outBody) {
-				outBody = body
-				usedRedacted = false
-				auditEv.Note = "invalid_json"
 			}
 
 			recordAudit()
@@ -1312,12 +1337,18 @@ func (s *Server) applyConfig(c config.Config) {
 		slog.Warn("Invalid proxy intercept_mode, defaulting to global", "intercept_mode", c.Proxy.InterceptMode)
 	}
 
+	invalidJSONPolicy := invalidJSONPolicyPartial
+	if strings.ToLower(strings.TrimSpace(c.Proxy.InvalidJSONPolicy)) == invalidJSONPolicyBlock {
+		invalidJSONPolicy = invalidJSONPolicyBlock
+	}
+
 	s.runtime.Store(runtimeConfig{
 		interceptMode:          interceptMode,
 		targets:                targets,
 		redactEng:              redactor,
 		restoreEng:             restore.NewEngine(s.session, prefix),
 		websocketRedactionBeta: c.Proxy.WebSocketRedactionBeta,
+		invalidJSONPolicy:      invalidJSONPolicy,
 	})
 }
 

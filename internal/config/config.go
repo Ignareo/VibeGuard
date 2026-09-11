@@ -33,6 +33,10 @@ type ProxyConfig struct {
 	// WebSocketRedactionBeta enables best-effort WebSocket text-message redaction/restore.
 	// It is intentionally off by default because some servers/extensions may be incompatible.
 	WebSocketRedactionBeta bool `yaml:"websocket_redaction_beta"`
+	// InvalidJSONPolicy controls the fallback when whole-text redaction would corrupt a
+	// valid JSON request body: "partial" (default) drops only the JSON-breaking matches and
+	// forwards the rest redacted; "block" rejects the request with an error instead.
+	InvalidJSONPolicy string `yaml:"invalid_json_policy"`
 }
 
 // PatternsConfig holds pattern matching configuration
@@ -152,6 +156,7 @@ var defaultConfig = Config{
 		PlaceholderPrefix:      "__VG_",
 		InterceptMode:          "global",
 		WebSocketRedactionBeta: false,
+		InvalidJSONPolicy:      "partial",
 	},
 	Patterns: PatternsConfig{
 		Keywords:    []KeywordPattern{},
@@ -398,6 +403,10 @@ func sanitizeLoadedConfig(cfg *Config) {
 	cfg.Proxy.Listen = strings.TrimSpace(cfg.Proxy.Listen)
 	cfg.Proxy.PlaceholderPrefix = strings.TrimSpace(cfg.Proxy.PlaceholderPrefix)
 	cfg.Proxy.InterceptMode = strings.TrimSpace(cfg.Proxy.InterceptMode)
+	cfg.Proxy.InvalidJSONPolicy = strings.ToLower(strings.TrimSpace(cfg.Proxy.InvalidJSONPolicy))
+	if cfg.Proxy.InvalidJSONPolicy != "partial" && cfg.Proxy.InvalidJSONPolicy != "block" {
+		cfg.Proxy.InvalidJSONPolicy = defaultConfig.Proxy.InvalidJSONPolicy
+	}
 
 	// Patterns: keywords
 	if len(cfg.Patterns.Keywords) > 0 {
@@ -810,6 +819,9 @@ func mergeConfigs(global, project Config) Config {
 	}
 	if project.Proxy.WebSocketRedactionBeta {
 		result.Proxy.WebSocketRedactionBeta = true
+	}
+	if project.Proxy.InvalidJSONPolicy != "" {
+		result.Proxy.InvalidJSONPolicy = project.Proxy.InvalidJSONPolicy
 	}
 	if project.Session.TTL != "" {
 		result.Session.TTL = project.Session.TTL

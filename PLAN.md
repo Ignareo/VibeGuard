@@ -118,7 +118,7 @@
 
 | 编号 | 状态 |
 |---|---|
-| P1-1 invalid_json 回退 | ☐ |
+| P1-1 invalid_json 回退 | ☑ |
 | P1-2 JSON 字段覆盖 | ☐ |
 | P1-3 system-reminder 豁免 | ☐ |
 | P1-4 SSE delta 还原 | ☐ |
