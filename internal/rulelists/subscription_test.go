@@ -145,3 +145,77 @@ func TestSubscriptionNoPinStillWorks(t *testing.T) {
 		t.Fatalf("unpinned subscription should follow content changes: updated=%v err=%v", updated, err)
 	}
 }
+
+func TestSubscriptionRedirectDowngradeRejected(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
+	// Plain-HTTP target that a redirect would pull content from.
+	body := testRulesV1
+	target := newRuleServer(t, &body)
+	defer target.Close()
+
+	// HTTPS origin that redirects every request to the plain-HTTP target.
+	origin := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, target.URL, http.StatusFound)
+	}))
+	defer origin.Close()
+
+	// allow_http=false: the https->http redirect must be refused, not followed.
+	rl := config.RuleListConfig{
+		ID:        "redirect-test",
+		URL:       origin.URL,
+		AllowHTTP: false,
+		Enabled:   true,
+	}
+	_, meta, err := SyncSubscriptionIfDue(nil, rl, SyncSubscriptionOptions{Force: true, Client: origin.Client()})
+	if err == nil {
+		t.Fatalf("https->http redirect must be rejected when allow_http=false")
+	}
+	if !strings.Contains(err.Error()+meta.LastError, "重定向") && !strings.Contains(err.Error()+meta.LastError, "http") {
+		t.Fatalf("expected redirect rejection error, got: %v / %q", err, meta.LastError)
+	}
+}
+
+func TestSubscriptionPinCheckedOn304(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
+	body := testRulesV1
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("If-None-Match") == `"v1"` {
+			w.WriteHeader(http.StatusNotModified)
+			return
+		}
+		w.Header().Set("ETag", `"v1"`)
+		fmt.Fprint(w, body)
+	}))
+	defer srv.Close()
+
+	rl := config.RuleListConfig{
+		ID:        "pin304-test",
+		URL:       srv.URL,
+		AllowHTTP: true,
+		Enabled:   true,
+	}
+
+	// First fetch: caches content with ETag (no pin configured yet).
+	if updated, _, err := syncOnce(t, rl); err != nil || !updated {
+		t.Fatalf("initial fetch failed: updated=%v err=%v", updated, err)
+	}
+
+	// Now configure a pin that does NOT match the cached content; the 304 path
+	// must validate the cached bytes against the pin instead of blindly accepting.
+	rl.SHA256Pin = sha256Hex(testRulesV2)
+	_, meta, err := syncOnce(t, rl)
+	if err == nil {
+		t.Fatalf("304 with mismatched pin must be rejected")
+	}
+	if !strings.Contains(meta.LastError, "不匹配") {
+		t.Fatalf("meta.LastError should record the pin mismatch, got: %q", meta.LastError)
+	}
+
+	// A matching pin is accepted on the 304 path.
+	rl.SHA256Pin = sha256Hex(testRulesV1)
+	if _, _, err := syncOnce(t, rl); err != nil {
+		t.Fatalf("304 with matching pin should be accepted, got: %v", err)
+	}
+}

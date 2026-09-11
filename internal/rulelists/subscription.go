@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -267,6 +268,22 @@ func SyncSubscriptionIfDue(ctx context.Context, rl config.RuleListConfig, opts S
 	if client == nil {
 		client = &http.Client{Timeout: defaultSubscriptionTimeout}
 	}
+	{
+		// Wrap the client so redirects cannot bypass the scheme validation below:
+		// an https URL must not be followed to http (allow_http bypass) or to a
+		// different host under an existing TOFU pin without revalidation.
+		clientCopy := *client
+		clientCopy.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+			if len(via) >= 10 {
+				return fmt.Errorf("重定向次数过多（>10）")
+			}
+			if err := validateRemoteURL(req.URL.String(), rl.AllowHTTP); err != nil {
+				return fmt.Errorf("拒绝重定向：%w", err)
+			}
+			return nil
+		}
+		client = &clientCopy
+	}
 	maxBytes := opts.MaxBytes
 	if maxBytes <= 0 {
 		maxBytes = maxSubscriptionRuleListBytes
@@ -340,6 +357,23 @@ func SyncSubscriptionIfDue(ctx context.Context, rl config.RuleListConfig, opts S
 			}
 			resp = resp2
 		} else {
+			// Cache exists: a 304 means the content equals what we last accepted, but a
+			// newly configured/reset pin must still be validated against the cached bytes.
+			if strings.TrimSpace(rl.SHA256Pin) != "" {
+				cached, readErr := os.ReadFile(rulesPath)
+				if readErr != nil {
+					meta.LastError = readErr.Error()
+					_ = SaveSubscriptionMeta(metaPath, meta)
+					return false, meta, readErr
+				}
+				sum := sha256.Sum256(cached)
+				if err := checkSubscriptionPin(rl.SHA256Pin, hex.EncodeToString(sum[:]), meta.PinnedSHA256, &meta); err != nil {
+					slog.Warn("订阅缓存内容未通过钉扎校验（304）", "url", meta.URL, "error", err)
+					meta.LastError = err.Error()
+					_ = SaveSubscriptionMeta(metaPath, meta)
+					return false, meta, err
+				}
+			}
 			// Cache exists: just update check time; keep existing fingerprint.
 			meta.LastError = ""
 			_ = SaveSubscriptionMeta(metaPath, meta)
@@ -380,7 +414,9 @@ func SyncSubscriptionIfDue(ctx context.Context, rl config.RuleListConfig, opts S
 	}
 
 	// Integrity pinning (anti-poisoning): reject tampered content before it can overwrite the cache.
-	if err := checkSubscriptionPin(rl.SHA256Pin, sumHex, prev.PinnedSHA256, &meta); err != nil {
+	// Note: uses meta.PinnedSHA256 (not prev.PinnedSHA256) so a URL change that reset the pin
+	// above starts a fresh TOFU cycle instead of validating against the old subscription's pin.
+	if err := checkSubscriptionPin(rl.SHA256Pin, sumHex, meta.PinnedSHA256, &meta); err != nil {
 		slog.Warn("订阅内容校验失败，已拒绝更新", "url", meta.URL, "error", err)
 		meta.CheckedAt = now.Unix()
 		meta.LastError = err.Error()
@@ -432,7 +468,7 @@ func checkSubscriptionPin(pin, sumHex, prevPinned string, meta *SubscriptionMeta
 			meta.PinnedSHA256 = sumHex
 			return nil
 		}
-		if pinned != sumHex {
+		if !hashEqualHexConstantTime(pinned, sumHex) {
 			return fmt.Errorf("订阅内容 sha256 (%s) 与 TOFU 钉扎值 (%s) 不匹配，已拒绝更新；如确认上游变更合法，请将 sha256_pin 改为该哈希或删除订阅缓存后重试", shortHash(sumHex), shortHash(pinned))
 		}
 		return nil
@@ -440,10 +476,20 @@ func checkSubscriptionPin(pin, sumHex, prevPinned string, meta *SubscriptionMeta
 	if !isSHA256Hex(pin) {
 		return fmt.Errorf("sha256_pin 格式非法（应为 64 位十六进制或 tofu）：%q", pin)
 	}
-	if pin != sumHex {
+	if !hashEqualHexConstantTime(pin, sumHex) {
 		return fmt.Errorf("订阅内容 sha256 (%s) 与 sha256_pin (%s) 不匹配，已拒绝更新；疑似订阅被篡改", shortHash(sumHex), shortHash(pin))
 	}
 	return nil
+}
+
+// hashEqualHexConstantTime compares two hex-encoded hashes in constant time.
+func hashEqualHexConstantTime(a, b string) bool {
+	a = strings.ToLower(strings.TrimSpace(a))
+	b = strings.ToLower(strings.TrimSpace(b))
+	if len(a) != len(b) {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(a), []byte(b)) == 1
 }
 
 func isSHA256Hex(s string) bool {
