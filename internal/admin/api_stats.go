@@ -19,10 +19,11 @@ type StatsResponse struct {
 		TTLSeconds     int `json:"ttl_seconds"`
 	} `json:"session"`
 	Requests struct {
-		Total    int64 `json:"total"`
-		Redacted int64 `json:"redacted"`
-		Restored int64 `json:"restored"`
-		Errors   int64 `json:"errors"`
+		Total       int64 `json:"total"`
+		Redacted    int64 `json:"redacted"`
+		Restored    int64 `json:"restored"`
+		Errors      int64 `json:"errors"`
+		NERFailures int64 `json:"ner_failures"`
 	} `json:"requests"`
 }
 
@@ -56,6 +57,7 @@ func (a *Admin) handleStats(w http.ResponseWriter, r *http.Request) {
 	resp.Requests.Redacted = a.stats.RedactedRequests.Load()
 	resp.Requests.Restored = a.stats.RestoredRequests.Load()
 	resp.Requests.Errors = a.stats.Errors.Load()
+	resp.Requests.NERFailures = a.stats.NERFailures.Load()
 
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
@@ -109,6 +111,7 @@ func (a *Admin) handleStatsStream(w http.ResponseWriter, r *http.Request) {
 			resp.Requests.Redacted = a.stats.RedactedRequests.Load()
 			resp.Requests.Restored = a.stats.RestoredRequests.Load()
 			resp.Requests.Errors = a.stats.Errors.Load()
+			resp.Requests.NERFailures = a.stats.NERFailures.Load()
 
 			data, _ := json.Marshal(resp)
 			w.Write([]byte("event: stats\ndata: " + string(data) + "\n\n"))

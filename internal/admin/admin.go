@@ -21,6 +21,8 @@ type StatsCollector struct {
 	RedactedRequests atomic.Int64
 	RestoredRequests atomic.Int64
 	Errors           atomic.Int64
+	// NERFailures counts silently skipped NER analyses (overloaded/request/status/decode).
+	NERFailures atomic.Int64
 }
 
 // Admin handles the web UI HTTP endpoints

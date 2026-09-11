@@ -49,3 +49,12 @@ func (e *Engine) AddBuiltin(name string) error {
 	}
 	return e.AddRegex(rule.pattern, rule.category)
 }
+
+// BuiltinRule returns the pattern and category of a named built-in rule.
+func BuiltinRule(name string) (pattern, category string, ok bool) {
+	rule, ok := builtinRules[name]
+	if !ok {
+		return "", "", false
+	}
+	return rule.pattern, rule.category, true
+}

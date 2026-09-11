@@ -1230,17 +1230,13 @@ func (s *Server) applyConfig(c config.Config) {
 		}
 	}
 
-	// The admin UI does not edit regex/builtin directly: use rule lists (.vgrules) for reusable regex/keyword rules.
-	// If the user still configured regex/builtin in config, warn and ignore them here
-	// to avoid "over-broad regexes corrupting the whole text".
-	if len(c.Patterns.Regex) > 0 || len(c.Patterns.Builtin) > 0 {
-		slog.Warn("Ignoring regex/builtin patterns; use rule lists for reusable regex/keywords",
-			"regex", len(c.Patterns.Regex),
-			"builtin", len(c.Patterns.Builtin),
-		)
+	// patterns.regex / patterns.builtin take effect via inline rule lists in the pipeline
+	// (they force the pipeline path even when no rule lists/NER are configured).
+	// Invalid entries are logged as errors instead of being silently ignored.
+	ruleRecs, inlineErrs := buildInlineRuleRecognizers(c.Patterns)
+	for _, err := range inlineErrs {
+		slog.Error("Invalid patterns.regex/builtin entry", "error", err)
 	}
-
-	var ruleRecs []piirec.Recognizer
 	for _, rl := range c.Patterns.RuleLists {
 		if !rl.Enabled {
 			continue
@@ -1297,11 +1293,21 @@ func (s *Server) applyConfig(c config.Config) {
 		merged = append(merged, ruleRecs...)
 
 		if c.Patterns.NER.Enabled {
+			stats := s.admin.GetStats()
 			rec, err := ner.New(ner.Options{
 				PresidioURL: c.Patterns.NER.PresidioURL,
 				Language:    c.Patterns.NER.Language,
 				Entities:    c.Patterns.NER.Entities,
 				MinScore:    c.Patterns.NER.MinScore,
+				OnFailure: func(kind string) {
+					// NER failures were previously silent; count them (visible via
+					// /manager/api/stats as ner_failures) and log sparsely.
+					n := stats.NERFailures.Add(1)
+					if n <= 3 || n%100 == 0 {
+						slog.Warn("NER analysis skipped; entities in this request were NOT redacted by NER",
+							"kind", kind, "total", n)
+					}
+				},
 			})
 			if err != nil {
 				slog.Warn("Failed to init NER recognizer; continuing without NER", "error", err)

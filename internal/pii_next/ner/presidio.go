@@ -19,6 +19,7 @@ type presidioRecognizer struct {
 	client     *http.Client
 	timeout    time.Duration
 	sem        chan struct{}
+	onFailure  func(kind string)
 
 	language   string
 	entities   []string
@@ -58,6 +59,7 @@ func newPresidioRecognizer(analyzeURL string, opts Options) *presidioRecognizer 
 		minScore:   opts.MinScore,
 		priority:   40, // Lower than the default rule-list priority (50) to avoid generic NER overriding explicit rules.
 		sourceName: "ner-presidio",
+		onFailure:  opts.OnFailure,
 	}
 	if opts.MaxConcurrency > 0 {
 		r.sem = make(chan struct{}, opts.MaxConcurrency)
@@ -66,6 +68,12 @@ func newPresidioRecognizer(analyzeURL string, opts Options) *presidioRecognizer 
 }
 
 func (r *presidioRecognizer) Name() string { return r.sourceName }
+
+func (r *presidioRecognizer) fail(kind string) {
+	if r != nil && r.onFailure != nil {
+		r.onFailure(kind)
+	}
+}
 
 func (r *presidioRecognizer) Recognize(input []byte) []recognizer.Match {
 	if r == nil || len(input) == 0 {
@@ -81,6 +89,7 @@ func (r *presidioRecognizer) Recognize(input []byte) []recognizer.Match {
 			defer func() { <-r.sem }()
 		default:
 			// Concurrency limit reached: skip to avoid slowing down the proxy hot path.
+			r.fail("overloaded")
 			return nil
 		}
 	}
@@ -118,17 +127,20 @@ func (r *presidioRecognizer) Recognize(input []byte) []recognizer.Match {
 	// Do not reuse the proxy transport: NER is an optional external component and should not impact the main path.
 	resp, err := r.client.Do(httpReq)
 	if err != nil {
+		r.fail("request")
 		return nil
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		_, _ = io.Copy(io.Discard, resp.Body)
+		r.fail("status")
 		return nil
 	}
 
 	var items []presidioAnalyzeResponseItem
 	if err := json.NewDecoder(resp.Body).Decode(&items); err != nil {
+		r.fail("decode")
 		return nil
 	}
 	if len(items) == 0 {

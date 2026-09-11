@@ -32,6 +32,10 @@ type Options struct {
 	MaxConcurrency int
 	// HTTPClient allows injecting a custom client (testing or advanced use). If nil, a default client is used.
 	HTTPClient *http.Client
+	// OnFailure is invoked (best-effort, synchronously) when an NER analysis is silently skipped:
+	// kind is one of "overloaded" (concurrency limit), "request" (HTTP call failed/timeout),
+	// "status" (non-2xx response), "decode" (invalid response body). Nil disables the hook.
+	OnFailure func(kind string)
 }
 
 // SafeEntityNames returns a default entity set with relatively low false positives.
