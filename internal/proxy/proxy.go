@@ -115,6 +115,17 @@ func NewServer(cfg *config.Manager, ca *cert.CA, certPath, keyPath string) (*Ser
 		if err != nil {
 			return nil, fmt.Errorf("failed to init session WAL: %w", err)
 		}
+		// Batched fsync: a per-mapping fsync is the biggest hot-path latency source.
+		syncInterval := 200 * time.Millisecond
+		if s := strings.TrimSpace(c.Session.WALSyncInterval); s != "" {
+			if d, err := time.ParseDuration(s); err == nil {
+				syncInterval = d
+			} else {
+				slog.Warn("Invalid session.wal_sync_interval, using default", "value", s, "default", syncInterval)
+			}
+		}
+		wal.SetAsyncFlush(syncInterval, 64)
+		sess.SetWALCompactBytes(c.Session.WALCompactBytes)
 		if err := wal.RestoreInto(sess); err != nil {
 			slog.Warn("Failed to restore session WAL; continuing with empty in-memory mappings", "error", err, "path", walPath)
 		}

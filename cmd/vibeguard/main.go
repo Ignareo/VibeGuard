@@ -1031,6 +1031,10 @@ func runInit(cmd *cobra.Command, args []string) error {
 session:
   ttl: %s
   max_mappings: 100000
+  # WAL fsync batching interval ("0" = fsync every mapping, legacy behavior)
+  # wal_sync_interval: 200ms
+  # Rewrite the WAL with live mappings only when it exceeds this size (0 = never)
+  # wal_compact_bytes: 4194304
 
 log:
   file: %s
@@ -1092,6 +1096,10 @@ proxy:
 session:
   ttl: %s
   max_mappings: 100000
+  # WAL fsync batching interval ("0" = fsync every mapping, legacy behavior)
+  # wal_sync_interval: 200ms
+  # Rewrite the WAL with live mappings only when it exceeds this size (0 = never)
+  # wal_compact_bytes: 4194304
 
 log:
   file: %s

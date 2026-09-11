@@ -134,6 +134,15 @@ type SessionConfig struct {
 	WALEnabled                bool   `yaml:"wal_enabled"`
 	WALPath                   string `yaml:"wal_path"`
 	DeterministicPlaceholders bool   `yaml:"deterministic_placeholders"`
+	// WALSyncInterval controls WAL fsync batching (time.ParseDuration).
+	// Default 200ms: appends are buffered and fsynced by a background flusher (or when 64
+	// entries are pending). "0" restores the legacy behavior of fsync on every mapping.
+	// A crash within the interval can lose the newest mappings (placeholders then stay
+	// unrestored in responses) — acceptable for most local use.
+	WALSyncInterval string `yaml:"wal_sync_interval"`
+	// WALCompactBytes triggers WAL compaction (rewrite with live mappings only) when the
+	// WAL file exceeds this size. Default 4MB; 0 disables compaction.
+	WALCompactBytes int64 `yaml:"wal_compact_bytes"`
 }
 
 // LogConfig holds logging configuration
@@ -217,6 +226,8 @@ var defaultConfig = Config{
 		WALEnabled:                true,
 		WALPath:                   "~/.vibeguard/session.wal",
 		DeterministicPlaceholders: false,
+		WALSyncInterval:           "200ms",
+		WALCompactBytes:           4 << 20,
 	},
 	Log: LogConfig{
 		Level:     "info",
@@ -852,6 +863,12 @@ func mergeConfigs(global, project Config) Config {
 	}
 	if project.Session.MaxMappings != 0 {
 		result.Session.MaxMappings = project.Session.MaxMappings
+	}
+	if project.Session.WALSyncInterval != "" {
+		result.Session.WALSyncInterval = project.Session.WALSyncInterval
+	}
+	if project.Session.WALCompactBytes != 0 {
+		result.Session.WALCompactBytes = project.Session.WALCompactBytes
 	}
 	if project.Log.Level != "" {
 		result.Log.Level = project.Log.Level

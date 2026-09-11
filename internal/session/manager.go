@@ -23,6 +23,8 @@ type Manager struct {
 	created  map[string]time.Time // placeholder -> creation time
 	stopChan chan struct{}
 	wal      *WAL
+	// walCompactBytes triggers WAL compaction when the file exceeds this size (<=0 disables).
+	walCompactBytes int64
 	// randomSecret is a random key generated on process start (default mode: stable within this process only).
 	// deterministicSecret is the key used in "deterministic placeholders" mode (typically derived from the CA private key).
 	// Notes:
@@ -238,6 +240,46 @@ func (m *Manager) AttachWAL(wal *WAL) {
 	}
 }
 
+// SetWALCompactBytes sets the WAL size threshold for automatic compaction (<=0 disables).
+func (m *Manager) SetWALCompactBytes(n int64) {
+	m.mu.Lock()
+	m.walCompactBytes = n
+	m.mu.Unlock()
+}
+
+// compactWALIfOversized rewrites the WAL with only the live mappings when it has grown
+// beyond walCompactBytes (the WAL is append-only and would otherwise grow unbounded).
+func (m *Manager) compactWALIfOversized() {
+	m.mu.RLock()
+	wal := m.wal
+	threshold := m.walCompactBytes
+	m.mu.RUnlock()
+	if wal == nil || threshold <= 0 {
+		return
+	}
+	size, err := wal.FileSize()
+	if err != nil || size <= threshold {
+		return
+	}
+
+	m.mu.RLock()
+	entries := make([]WALEntry, 0, len(m.forward))
+	for placeholder, original := range m.forward {
+		entries = append(entries, WALEntry{
+			Placeholder: placeholder,
+			Original:    original,
+			CreatedAt:   m.created[placeholder],
+		})
+	}
+	m.mu.RUnlock()
+
+	if err := wal.Compact(entries); err != nil {
+		slog.Warn("Failed to compact session WAL", "error", err)
+		return
+	}
+	slog.Info("Compacted session WAL", "old_bytes", size, "live_entries", len(entries))
+}
+
 // MappingInfo represents a mapping entry for listing (without original value)
 type MappingInfo struct {
 	Placeholder string
@@ -280,6 +322,7 @@ func (m *Manager) cleanupLoop() {
 		select {
 		case <-ticker.C:
 			m.cleanup()
+			m.compactWALIfOversized()
 		case <-m.stopChan:
 			return
 		}
