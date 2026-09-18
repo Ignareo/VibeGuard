@@ -35,6 +35,8 @@ var (
 	trustMode       string
 	startForeground bool
 	envShell        string
+	rulesCategory   string
+	testText        string
 )
 
 func uiLang() string {
@@ -181,10 +183,13 @@ On macOS/Linux this may require sudo. On Windows this requires Administrator.`,
 
 var testCmd = &cobra.Command{
 	Use:   "test [pattern] [text]",
-	Short: "Test a redaction pattern",
-	Long: `Test a redaction pattern against sample text to see how it works.
-Pattern is treated as a keyword (exact substring match).`,
-	Args: cobra.ExactArgs(2),
+	Short: "Test redaction (pattern mode, or --text for a full dry-run)",
+	Long: `Test redaction against sample text.
+
+With a pattern and text, tests the pattern as a keyword (exact substring match).
+With --text, runs a full dry-run with the real config (keywords, rule lists,
+inline regex/builtin rules, NER if enabled) and prints every match.`,
+	Args: cobra.RangeArgs(0, 2),
 	RunE: runTest,
 }
 
@@ -196,6 +201,43 @@ var versionCmd = &cobra.Command{
 		fmt.Printf("  Git commit: %s\n", version.GitCommit)
 		fmt.Printf("  Build date: %s\n", version.BuildDate)
 	},
+}
+
+var rulesCmd = &cobra.Command{
+	Use:   "rules",
+	Short: "Manage redaction keywords in the global config",
+	Long: `Manage patterns.keywords in the global VibeGuard config (~/.vibeguard/config.yaml).
+
+Keyword values are stored encrypted on disk (the key is derived from the CA
+private key); this command shows plaintext. A running proxy hot-reloads
+changes automatically, no restart needed.`,
+	RunE: func(cmd *cobra.Command, args []string) error { return cmd.Help() },
+}
+
+var rulesListCmd = &cobra.Command{
+	Use:          "list",
+	Short:        "List configured redaction keywords (value + category)",
+	Args:         cobra.NoArgs,
+	SilenceUsage: true,
+	RunE:         runRulesList,
+}
+
+var rulesAddCmd = &cobra.Command{
+	Use:   "add <keyword>",
+	Short: "Add a redaction keyword",
+	Long: `Add a keyword to patterns.keywords in the global config.
+Adding a keyword value that already exists is rejected.`,
+	Args:         cobra.ExactArgs(1),
+	SilenceUsage: true,
+	RunE:         runRulesAdd,
+}
+
+var rulesRemoveCmd = &cobra.Command{
+	Use:          "remove <keyword>",
+	Short:        "Remove a redaction keyword by exact value",
+	Args:         cobra.ExactArgs(1),
+	SilenceUsage: true,
+	RunE:         runRulesRemove,
 }
 
 func init() {
@@ -215,10 +257,16 @@ func init() {
 	rootCmd.AddCommand(trustCmd)
 	rootCmd.AddCommand(testCmd)
 	rootCmd.AddCommand(versionCmd)
+	rulesCmd.AddCommand(rulesListCmd)
+	rulesCmd.AddCommand(rulesAddCmd)
+	rulesCmd.AddCommand(rulesRemoveCmd)
+	rootCmd.AddCommand(rulesCmd)
 
 	trustCmd.Flags().StringVar(&trustMode, "mode", string(cert.TrustInstallModeSystem), "trust store mode: system|user|auto")
 	startCmd.Flags().BoolVar(&startForeground, "foreground", false, "run in foreground (for service/debugging)")
 	envCmd.Flags().StringVar(&envShell, "shell", "sh", "shell type: sh|bash|zsh|fish|powershell")
+	rulesAddCmd.Flags().StringVar(&rulesCategory, "category", "", "category for the keyword (default TEXT)")
+	testCmd.Flags().StringVar(&testText, "text", "", "dry-run the full detection pipeline from the real config against this text")
 }
 
 func newAssistantProxyCmd(exeName, displayName string) *cobra.Command {
@@ -947,6 +995,11 @@ func runProxy(cmd *cobra.Command, args []string) error {
 
 	select {
 	case err := <-errChan:
+		if isAddrInUseErr(err) {
+			fmt.Fprintln(os.Stderr, uiText(uiLang(),
+				"启动失败：监听地址已被占用。可先执行 'vibeguard stop' 停止已运行的实例，或修改配置中的 proxy.listen 端口后重试。",
+				"Failed to start: the listen address is already in use. Run 'vibeguard stop' to stop the existing instance first, or change the proxy.listen port in the config and retry."))
+		}
 		return err
 	case sig := <-sigChan:
 		slog.Info("Received signal, shutting down", "signal", sig)
@@ -954,6 +1007,17 @@ func runProxy(cmd *cobra.Command, args []string) error {
 	}
 
 	return nil
+}
+
+// isAddrInUseErr reports whether err is an "address already in use" listen failure.
+func isAddrInUseErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, syscall.EADDRINUSE) {
+		return true
+	}
+	return strings.Contains(strings.ToLower(err.Error()), "address already in use")
 }
 
 func runInit(cmd *cobra.Command, args []string) error {
@@ -1049,6 +1113,10 @@ log:
 #   retention: 7d
 #   persist_raw_values: false
 
+# Security-sensitive overrides from a project-level .vibeguard.yaml (audit_db, proxy.listen,
+# proxy.intercept_mode, rule_lists URLs) are ignored unless explicitly allowed here.
+# allow_project_sensitive_overrides: false
+
 	# Target hosts to intercept (AI API endpoints)
 	targets:
   - host: api.anthropic.com
@@ -1065,9 +1133,16 @@ log:
     enabled: true
   - host: api.kimi.com
     enabled: true
+  - host: opencode.ai
+    enabled: true
 
 	# Sensitive data matching rules
 	patterns:
+	  # Example (uncomment and remove the "keywords: []" line below, or use
+	  # 'vibeguard rules add <word> --category <CATEGORY>'):
+	  # keywords:
+	  #   - value: "internal.example.com"
+	  #     category: INTERNAL
 	  keywords: []
 	  exclude: []
 	  # Optional: import secrets from local files (e.g. .env) and redact them automatically.
@@ -1076,11 +1151,16 @@ log:
 	  #     format: dotenv
 	  #     enabled: true
 	  # Optional: remote rule-list subscriptions (.vgrules). sha256_pin pins the content
-	  # hash against poisoning: "tofu" (trust-on-first-use) or a 64-char hex sha256.
+	  # hash against poisoning: leave empty or "tofu" for trust-on-first-use (the sha256 of
+	  # the first successful fetch is recorded and later content changes are rejected), or
+	  # pin a fixed 64-char hex sha256. Repeated sync failures are surfaced in the admin UI.
 	  # rule_lists:
 	  #   - name: my-rules
 	  #     url: https://example.com/rules.vgrules
 	  #     sha256_pin: tofu
+	  #     enabled: true
+	  #   # Local rule-list file example (mutually exclusive with url):
+	  #   - path: ~/.vibeguard/rules/local/my.vgrules
 	  #     enabled: true
 	`
 
@@ -1115,6 +1195,10 @@ log:
 #   retention: 7d
 #   persist_raw_values: false
 
+# Security-sensitive overrides from a project-level .vibeguard.yaml (audit_db, proxy.listen,
+# proxy.intercept_mode, rule_lists URLs) are ignored unless explicitly allowed here.
+# allow_project_sensitive_overrides: false
+
 # Target hosts to intercept (AI API endpoints)
 targets:
   - host: api.anthropic.com
@@ -1131,9 +1215,16 @@ targets:
     enabled: true
   - host: api.kimi.com
     enabled: true
+  - host: opencode.ai
+    enabled: true
 
 # Sensitive data patterns
 patterns:
+  # Example (uncomment and remove the "keywords: []" line below, or use
+  # 'vibeguard rules add <word> --category <CATEGORY>'):
+  # keywords:
+  #   - value: "internal.example.com"
+  #     category: INTERNAL
   keywords: []
   exclude: []
   # Optional: import secrets from local files (e.g. .env) and redact them automatically.
@@ -1142,11 +1233,16 @@ patterns:
   #     format: dotenv
   #     enabled: true
   # Optional: remote rule-list subscriptions (.vgrules). sha256_pin pins the content
-  # hash against poisoning: "tofu" (trust-on-first-use) or a 64-char hex sha256.
+  # hash against poisoning: leave empty or "tofu" for trust-on-first-use (the sha256 of
+  # the first successful fetch is recorded and later content changes are rejected), or
+  # pin a fixed 64-char hex sha256. Repeated sync failures are surfaced in the admin UI.
   # rule_lists:
   #   - name: my-rules
   #     url: https://example.com/rules.vgrules
   #     sha256_pin: tofu
+  #     enabled: true
+  #   # Local rule-list file example (mutually exclusive with url):
+  #   - path: ~/.vibeguard/rules/local/my.vgrules
   #     enabled: true
 `
 
@@ -1183,6 +1279,8 @@ patterns:
 		fmt.Printf(uiText(lang, "CA 证书已生成：%s\n", "CA certificate generated at %s\n"), caCertPath)
 
 		// Ask about trusting (default: system, since many CLI tools won't trust user-only stores)
+		printCARiskHint(lang, os.Stdout)
+		fmt.Println()
 		fmt.Println(uiText(lang, "\n是否将 CA 证书安装到信任库？", "\nInstall CA certificate to trust store?"))
 		fmt.Println(uiText(lang, "  1) 系统信任库（需要 sudo，推荐）", "  1) System trust store (sudo, recommended)"))
 		fmt.Println(uiText(lang, "  2) 用户信任库（无需 sudo）", "  2) User trust store (no sudo)"))
@@ -1218,6 +1316,21 @@ patterns:
 	return nil
 }
 
+// printCARiskHint prints a short security note about the local CA before it is
+// trusted: the private key is only as protected as this user account, and how to
+// remove the trust later. Used by `vibeguard trust` and the init wizard.
+func printCARiskHint(lang string, w io.Writer) {
+	caKeyPath := filepath.Join(config.GetConfigDir(), "ca.key")
+	fmt.Fprintln(w, uiText(lang, "安全提示：", "Security note:"))
+	fmt.Fprintf(w, uiText(lang,
+		"  - CA 私钥位于 %s（权限 0600 仅防其他用户；以你身份运行的恶意软件仍可读取并冒签证书，请保管好本机环境）。\n",
+		"  - The CA private key lives at %s (mode 0600 only keeps out other users; malware running as you can still read it and mint certificates — keep this machine clean)."),
+		caKeyPath)
+	fmt.Fprintln(w, uiText(lang,
+		"  - 卸载/移除信任：运行 uninstall.sh（Windows 用 uninstall.ps1），它会尝试自动从信任库移除 \"VibeGuard CA\"；也可手动从系统/用户信任库删除该证书。",
+		"  - To uninstall/remove trust later: run uninstall.sh (uninstall.ps1 on Windows), which tries to remove \"VibeGuard CA\" from the trust store automatically; you can also delete that certificate from the system/user trust store manually."))
+}
+
 func runTrust(cmd *cobra.Command, args []string) error {
 	lang := uiLang()
 	configDir := config.GetConfigDir()
@@ -1230,6 +1343,9 @@ func runTrust(cmd *cobra.Command, args []string) error {
 		}
 		return fmt.Errorf("CA certificate not found at %s. Run 'vibeguard init' first", caCertPath)
 	}
+
+	printCARiskHint(lang, os.Stdout)
+	fmt.Println()
 
 	fmt.Printf(uiText(lang, "正在安装 CA 证书（来源：%s）\n", "Installing CA certificate from %s\n"), caCertPath)
 	fmt.Println(uiText(lang, "可能会提示输入管理员权限...", "This may prompt for administrator privileges..."))
@@ -1256,6 +1372,24 @@ func runTrust(cmd *cobra.Command, args []string) error {
 }
 
 func runTest(cmd *cobra.Command, args []string) error {
+	lang := uiLang()
+
+	// Dry-run mode: full detection pipeline from the real config.
+	if text := strings.TrimSpace(testText); text != "" {
+		if len(args) > 0 {
+			return errors.New(uiText(lang,
+				"--text 模式不接受位置参数（用法：vibeguard test --text \"要检测的文本\"）。",
+				"--text mode takes no positional arguments (usage: vibeguard test --text \"text to check\")."))
+		}
+		return runTestDryRun(cmd, lang, text)
+	}
+
+	if len(args) != 2 {
+		return errors.New(uiText(lang,
+			"用法：vibeguard test <pattern> <text>，或 vibeguard test --text \"要检测的文本\"。",
+			"usage: vibeguard test <pattern> <text>, or vibeguard test --text \"text to check\"."))
+	}
+
 	pattern := args[0]
 	text := args[1]
 
@@ -1279,5 +1413,190 @@ func runTest(cmd *cobra.Command, args []string) error {
 		fmt.Printf("  %d mapping(s) stored\n", sess.Size())
 	}
 
+	return nil
+}
+
+// loadRulesConfig loads the effective config with pattern at-rest decryption configured,
+// mirroring the daemon's setup in runProxy: the storage key is derived from the CA
+// private key so `rules list` shows plaintext while values on disk stay encrypted
+// (and stay compatible with Admin UI writes).
+func loadRulesConfig(lang string) (*config.Manager, error) {
+	cfg, err := config.Load(cfgFile)
+	if err != nil {
+		return nil, fmt.Errorf(uiText(lang, "加载配置失败：%v", "Failed to load config: %v"), err)
+	}
+
+	configDir := config.GetConfigDir()
+	caCertPath := filepath.Join(configDir, "ca.crt")
+	caKeyPath := filepath.Join(configDir, "ca.key")
+
+	// If a config file already exists but the CA private key is missing, any previously
+	// encrypted keyword values would be undecryptable (a freshly generated CA derives a
+	// different key), so refuse with a clear hint instead of silently generating a new CA.
+	if _, err := os.Stat(caKeyPath); err != nil && rulesConfigFileExists() {
+		_ = cfg.Close()
+		return nil, fmt.Errorf(uiText(lang,
+			"未找到 CA 私钥：%s，无法解密配置中可能存在的加密关键词。请先运行 'vibeguard init' 或 'vibeguard start' 初始化（注意：由旧 CA 加密的密文将无法恢复）。",
+			"CA private key not found at %s; cannot decrypt any encrypted keywords in the config. Run 'vibeguard init' or 'vibeguard start' to set up first (note: ciphertext encrypted by a previous CA cannot be recovered)."), caKeyPath)
+	}
+
+	ca, err := cert.LoadOrGenerateCA(caCertPath, caKeyPath)
+	if err != nil {
+		_ = cfg.Close()
+		return nil, fmt.Errorf(uiText(lang, "加载/生成 CA 证书失败：%v", "Failed to load/generate CA: %v"), err)
+	}
+	key, err := ca.DeriveStorageKey()
+	if err != nil {
+		_ = cfg.Close()
+		return nil, fmt.Errorf(uiText(lang, "派生配置加密密钥失败：%v", "Failed to derive the pattern storage key: %v"), err)
+	}
+	if err := cfg.SetPatternEncryptionKey(key); err != nil {
+		_ = cfg.Close()
+		return nil, fmt.Errorf(uiText(lang, "配置关键词加密失败：%v", "Failed to configure pattern encryption: %v"), err)
+	}
+	// Reload so persisted ciphertext is decrypted into plaintext in memory;
+	// subsequent Update() calls write ciphertext back to disk.
+	if err := cfg.Load(); err != nil {
+		_ = cfg.Close()
+		return nil, fmt.Errorf(uiText(lang,
+			"解密配置中的关键词失败：%v（CA 私钥可能已更换，旧密文无法解密）",
+			"Failed to decrypt keywords in the config: %v (the CA private key may have changed; old ciphertext cannot be decrypted)"), err)
+	}
+	return cfg, nil
+}
+
+// rulesConfigFileExists reports whether the target config file (global, or the one
+// given via --config) already exists on disk.
+func rulesConfigFileExists() bool {
+	p := strings.TrimSpace(cfgFile)
+	if p == "" {
+		p = config.ConfigPath()
+	} else if strings.HasPrefix(p, "~/") {
+		if home, err := os.UserHomeDir(); err == nil && strings.TrimSpace(home) != "" {
+			p = filepath.Join(home, p[2:])
+		}
+	}
+	_, err := os.Stat(p)
+	return err == nil
+}
+
+// warnIfProjectConfigMerged warns that a project-level .vibeguard.yaml in the working
+// directory is merged into the effective config, and Manager.Update persists the merged
+// result into the global config file.
+func warnIfProjectConfigMerged(lang string, w io.Writer) {
+	if _, err := os.Stat(config.ProjectConfigPath()); err == nil {
+		fmt.Fprintln(w, uiText(lang,
+			"警告：当前目录存在项目级配置 .vibeguard.yaml；其关键词会并入生效配置，并随本次写入一并保存到全局配置。",
+			"Warning: a project-level .vibeguard.yaml exists in the current directory; its keywords are merged into the effective config and will be persisted into the global config on save."))
+	}
+}
+
+func printRulesHotReloadHint(lang string, w io.Writer) {
+	fmt.Fprintln(w, uiText(lang,
+		"提示：运行中的代理会自动热加载新配置，无需重启。",
+		"Tip: a running proxy hot-reloads the new config automatically; no restart needed."))
+}
+
+func runRulesList(cmd *cobra.Command, args []string) error {
+	lang := uiLang()
+
+	cfg, err := loadRulesConfig(lang)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = cfg.Close() }()
+
+	keywords := cfg.Get().Patterns.Keywords
+	if len(keywords) == 0 {
+		fmt.Fprintln(cmd.OutOrStdout(), uiText(lang, "当前没有配置任何关键词（patterns.keywords 为空）。", "No keywords configured (patterns.keywords is empty)."))
+		return nil
+	}
+
+	fmt.Fprintf(cmd.OutOrStdout(), uiText(lang, "共 %d 个关键词：\n", "%d keyword(s):\n"), len(keywords))
+	for _, kw := range keywords {
+		fmt.Fprintf(cmd.OutOrStdout(), "  - %s (category: %s)\n", kw.Value, kw.Category)
+	}
+	return nil
+}
+
+func runRulesAdd(cmd *cobra.Command, args []string) error {
+	lang := uiLang()
+
+	value := config.SanitizePatternValue(args[0])
+	if value == "" {
+		return errors.New(uiText(lang, "关键词不能为空（或仅包含不可见字符）。", "Keyword must not be empty (or contains only invisible characters)."))
+	}
+	category := config.SanitizeCategory(rulesCategory)
+	if category == "" {
+		category = "TEXT"
+	}
+
+	cfg, err := loadRulesConfig(lang)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = cfg.Close() }()
+
+	for _, kw := range cfg.Get().Patterns.Keywords {
+		if kw.Value == value {
+			return fmt.Errorf(uiText(lang,
+				"关键词 %q 已存在（分类：%s），未重复添加。",
+				"Keyword %q already exists (category: %s); not added again."), value, kw.Category)
+		}
+	}
+
+	warnIfProjectConfigMerged(lang, cmd.ErrOrStderr())
+
+	if err := cfg.Update(func(c *config.Config) {
+		c.Patterns.Keywords = append(c.Patterns.Keywords, config.KeywordPattern{Value: value, Category: category})
+	}); err != nil {
+		return fmt.Errorf(uiText(lang, "写入配置失败：%v", "Failed to write config: %v"), err)
+	}
+
+	fmt.Fprintf(cmd.OutOrStdout(), uiText(lang, "已添加关键词 %q（分类：%s）。\n", "Added keyword %q (category: %s).\n"), value, category)
+	printRulesHotReloadHint(lang, cmd.OutOrStdout())
+	return nil
+}
+
+func runRulesRemove(cmd *cobra.Command, args []string) error {
+	lang := uiLang()
+
+	value := config.SanitizePatternValue(args[0])
+	if value == "" {
+		return errors.New(uiText(lang, "关键词不能为空（或仅包含不可见字符）。", "Keyword must not be empty (or contains only invisible characters)."))
+	}
+
+	cfg, err := loadRulesConfig(lang)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = cfg.Close() }()
+
+	existing := cfg.Get().Patterns.Keywords
+	kept := make([]config.KeywordPattern, 0, len(existing))
+	removed := 0
+	for _, kw := range existing {
+		if kw.Value == value {
+			removed++
+			continue
+		}
+		kept = append(kept, kw)
+	}
+	if removed == 0 {
+		return fmt.Errorf(uiText(lang,
+			"未找到关键词 %q（可用 'vibeguard rules list' 查看当前关键词）。",
+			"Keyword %q not found (use 'vibeguard rules list' to see current keywords)."), value)
+	}
+
+	warnIfProjectConfigMerged(lang, cmd.ErrOrStderr())
+
+	if err := cfg.Update(func(c *config.Config) {
+		c.Patterns.Keywords = kept
+	}); err != nil {
+		return fmt.Errorf(uiText(lang, "写入配置失败：%v", "Failed to write config: %v"), err)
+	}
+
+	fmt.Fprintf(cmd.OutOrStdout(), uiText(lang, "已删除关键词 %q（%d 条）。\n", "Removed keyword %q (%d).\n"), value, removed)
+	printRulesHotReloadHint(lang, cmd.OutOrStdout())
 	return nil
 }
