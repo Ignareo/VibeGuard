@@ -4,7 +4,11 @@ import "time"
 
 // AuditMatch matches the admin audit display fields (for easier JSON serialization and persistence).
 type AuditMatch struct {
-	Category    string `json:"category"`
+	Category string `json:"category"`
+	// Source is a human-readable identifier of the rule that produced the hit
+	// (e.g. rulelist:<list name>, keywords, ner-presidio, regex). Stored inside
+	// the matches JSON blob, so no schema migration is needed.
+	Source      string `json:"source,omitempty"`
 	Placeholder string `json:"placeholder"`
 	Value       string `json:"value"`
 	IsPreview   bool   `json:"is_preview"`
@@ -24,10 +28,10 @@ type AuditEvent struct {
 	ContentType     string `json:"content_type"`
 	ContentEncoding string `json:"content_encoding,omitempty"`
 
-	Attempted    bool         `json:"attempted"`
-	RedactedCount int         `json:"redacted_count"`
-	Matches      []AuditMatch `json:"matches"`
-	Note         string       `json:"note,omitempty"`
+	Attempted     bool         `json:"attempted"`
+	RedactedCount int          `json:"redacted_count"`
+	Matches       []AuditMatch `json:"matches"`
+	Note          string       `json:"note,omitempty"`
 
 	ResponseStatus      int    `json:"response_status,omitempty"`
 	ResponseContentType string `json:"response_content_type,omitempty"`

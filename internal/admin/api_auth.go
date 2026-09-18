@@ -3,12 +3,29 @@ package admin
 import (
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"strings"
 	"time"
 )
 
 const loginMaxFailures = 5
+
+// isDirectLoopbackRequest reports whether r came in over a loopback TCP
+// connection and used the origin-form request target (r.URL.Host == "", i.e.
+// not an absolute-URI proxy-style request). An unparseable RemoteAddr is
+// treated as non-loopback.
+func isDirectLoopbackRequest(r *http.Request) bool {
+	if r.URL.Host != "" {
+		return false
+	}
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return false
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
 
 type AuthStatusResponse struct {
 	Configured    bool   `json:"configured"`
@@ -44,6 +61,17 @@ func (a *Admin) handleAuthStatus(w http.ResponseWriter, r *http.Request) {
 func (a *Admin) handleAuthSetup(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// The initial password setup grants full admin access, so it is only allowed
+	// from a direct loopback connection using the origin-form request target.
+	// This blocks a malicious page on the LAN from initializing/changing the admin
+	// password when the proxy is bound to a non-loopback address, and blocks
+	// absolute-URI (proxy-style) requests. Regular login is not restricted here
+	// because it already has brute-force lockout.
+	if !isDirectLoopbackRequest(r) {
+		http.Error(w, "Forbidden: setup is only allowed from a direct loopback connection (仅允许本机直连初始化)", http.StatusForbidden)
 		return
 	}
 

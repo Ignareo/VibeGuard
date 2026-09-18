@@ -296,6 +296,7 @@ func dbToAdminEvent(ev auditdb.AuditEvent) AuditEvent {
 		for i := range ev.Matches {
 			out.Matches[i] = AuditMatch{
 				Category:    ev.Matches[i].Category,
+				Source:      ev.Matches[i].Source,
 				Placeholder: ev.Matches[i].Placeholder,
 				Value:       ev.Matches[i].Value,
 				IsPreview:   ev.Matches[i].IsPreview,

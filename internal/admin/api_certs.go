@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"net/http"
+	"os"
 	"time"
 
 	"github.com/inkdust2021/vibeguard/internal/cert"
@@ -97,9 +98,36 @@ func (a *Admin) handleCertRegenerate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Generate new CA
+	certBackup := a.certPath + ".bak"
+	keyBackup := a.keyPath + ".bak"
+	haveExisting := fileExists(a.certPath) && fileExists(a.keyPath)
+	if haveExisting {
+		// Back up the old CA first (overwriting any stale previous backup) so a
+		// failed rotation can be rolled back and the old CA remains recoverable.
+		// LoadOrGenerateCA would otherwise silently reuse the existing files,
+		// making this endpoint a no-op.
+		_ = os.Remove(certBackup)
+		_ = os.Remove(keyBackup)
+		if err := os.Rename(a.certPath, certBackup); err != nil {
+			http.Error(w, "Failed to back up old CA: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		if err := os.Rename(a.keyPath, keyBackup); err != nil {
+			_ = os.Rename(certBackup, a.certPath) // best-effort restore
+			http.Error(w, "Failed to back up old CA key: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+	}
+
+	// Generate a brand-new CA (files were moved away above, so this always creates fresh material).
 	newCA, err := cert.LoadOrGenerateCA(a.certPath, a.keyPath)
 	if err != nil {
+		// Rotation failed: restore the previous CA so the proxy keeps working
+		// with the old (still trusted) certificate.
+		if haveExisting {
+			_ = os.Rename(certBackup, a.certPath)
+			_ = os.Rename(keyBackup, a.keyPath)
+		}
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -110,7 +138,12 @@ func (a *Admin) handleCertRegenerate(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{
-		"status":  "regenerated",
-		"message": "CA certificate regenerated. You may need to re-trust it.",
+		"status": "regenerated",
+		"message": "CA certificate regenerated. The old CA was backed up as ca.crt.bak / ca.key.bak.\n" +
+			"WARNING: the session WAL and encrypted keywords stored in the config are encrypted with a key derived from the OLD CA key and can no longer be decrypted after rotation (new sessions and new keywords are unaffected). Consider clearing old sessions and re-configuring encrypted keywords if needed.\n" +
+			"Clients must re-trust the new ca.crt.\n" +
+			"CA 证书已重新生成，旧 CA 已备份为 ca.crt.bak / ca.key.bak。\n" +
+			"警告：会话 WAL 与配置中加密存储的关键词均使用旧 CA 密钥派生加密，轮换后将无法解密（新会话与新关键词不受影响）。建议清除旧会话，必要时重新配置加密关键词。\n" +
+			"客户端需重新信任新的 ca.crt。",
 	})
 }

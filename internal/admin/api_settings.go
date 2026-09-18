@@ -13,6 +13,9 @@ import (
 type SettingsResponse struct {
 	Lang  string               `json:"lang"`
 	Proxy SettingsProxyPayload `json:"proxy"`
+	// NonLoopbackWarning is a server-composed warning shown as a banner in the
+	// admin UI when the proxy listens on a non-loopback address (""/omitted = none).
+	NonLoopbackWarning string `json:"non_loopback_warning,omitempty"`
 }
 
 type SettingsProxyPayload struct {
@@ -103,6 +106,7 @@ func (a *Admin) getSettings(w http.ResponseWriter, r *http.Request) {
 		Proxy: SettingsProxyPayload{
 			WebSocketRedactionBeta: c.Proxy.WebSocketRedactionBeta,
 		},
+		NonLoopbackWarning: a.nonLoopbackWarning(),
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")

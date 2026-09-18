@@ -7,7 +7,10 @@ import (
 
 // AuditMatch represents a sensitive fragment hit in a request (for admin UI display).
 type AuditMatch struct {
-	Category    string `json:"category"`
+	Category string `json:"category"`
+	// Source is a human-readable identifier of the rule that produced the hit
+	// (e.g. rulelist:<list name>, keywords, ner-presidio, regex).
+	Source      string `json:"source,omitempty"`
 	Placeholder string `json:"placeholder"`
 	// Value is the "display value": when privacy mode is enabled it is a preview (masked/truncated),
 	// otherwise it is the original (still truncated).

@@ -35,6 +35,10 @@ type RuleListItem struct {
 	UpdatedAt  int64  `json:"updated_at,omitempty"`
 	SHA256Pin  string `json:"sha256_pin,omitempty"`
 	PinnedHash string `json:"pinned_hash,omitempty"`
+
+	// ConsecutiveFailures is the subscription's consecutive sync failure count
+	// (0 after a successful sync). Surfaced so repeated failures are visible.
+	ConsecutiveFailures int `json:"consecutive_failures,omitempty"`
 }
 
 type RuleListsResponse struct {
@@ -361,6 +365,7 @@ func (a *Admin) getRuleLists(w http.ResponseWriter, r *http.Request) {
 					item.CheckedAt = meta.CheckedAt
 					item.UpdatedAt = meta.UpdatedAt
 					item.PinnedHash = meta.PinnedSHA256
+					item.ConsecutiveFailures = meta.ConsecutiveFailures
 				}
 			}
 		} else {
@@ -368,6 +373,13 @@ func (a *Admin) getRuleLists(w http.ResponseWriter, r *http.Request) {
 			abs := expandTildePath(path)
 			_, err := os.Stat(abs)
 			item.Exists = err == nil
+			// Surface local load failures recorded by the proxy after each config
+			// reload (keyed by the trimmed configured path; empty value = success).
+			if errs := a.localRuleListErrors(); errs != nil {
+				if msg := strings.TrimSpace(errs[path]); msg != "" {
+					item.LastError = msg
+				}
+			}
 		}
 
 		out = append(out, item)

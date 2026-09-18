@@ -604,6 +604,23 @@ try {
   & "$vg" "start" | Out-Null
 } catch { }
 
+# Optional: launcher functions for CLI assistants. PowerShell aliases cannot take
+# arguments, so the user adds small functions to $PROFILE; we only print them.
+if (-not $NonInteractive) {
+  $ans = Read-Host (T "是否为常用 CLI 助手添加启动函数（kimi/opencode，需手动加入 `$PROFILE）？(y/N)" "Add launcher functions for CLI assistants (kimi/opencode, requires a manual `$PROFILE edit)? (y/N)")
+  if ([string]::IsNullOrWhiteSpace($ans)) { $ans = "N" }
+  if ($ans -match '^(?i:y|yes)$') {
+    Say "请将以下函数加入 `$PROFILE（可运行“echo `$PROFILE”查看路径，用记事本打开编辑）：" "Add the following functions to your `$PROFILE (run 'echo `$PROFILE' for the path and edit it with notepad):"
+    Write-Host ""
+    Write-Host "    function kimi { vibeguard kimi @args }"
+    Write-Host "    function opencode { vibeguard opencode @args }"
+    Write-Host ""
+    Write-Host (T "    若已存在同名的 function/alias，请先移除，避免重复定义。" "    Remove any existing function/alias with the same name first to avoid duplicates.")
+  } else {
+    Say "已跳过启动函数提示" "Skipped launcher function hint"
+  }
+}
+
 Say "安装完成" "Done"
 Write-Host ""
 Write-Host (T "下一步：" "Next steps:")

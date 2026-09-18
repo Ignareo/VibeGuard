@@ -41,6 +41,19 @@ type Admin struct {
 	auth      *AuthManager
 	meta      *metaAuditLog
 
+	// localRuleListErrs holds the most recent load error per configured local
+	// rule list (key: strings.TrimSpace(rl.Path) of lists with an empty URL;
+	// empty value means the last load succeeded). Written by the proxy after
+	// each ReloadFromConfig, read by the rule-lists API.
+	localRuleListErrs atomic.Value // map[string]string
+
+	// nonLoopbackWarn is a server-composed warning shown as a banner in the
+	// admin UI when the proxy listens on a non-loopback address ("" = none).
+	nonLoopbackWarn atomic.Value // string
+
+	// redactTester is the dry-run redaction callback backing POST /manager/api/test.
+	redactTester atomic.Value // func(string) (string, []TestHit)
+
 	// Login brute-force protection: consecutive failures trigger a temporary lockout.
 	loginMu          sync.Mutex
 	loginFailures    int
@@ -81,6 +94,78 @@ func (a *Admin) GetStats() *StatsCollector {
 // SetStartTime records when the proxy started
 func (a *Admin) SetStartTime(unix int64) {
 	a.started.Store(unix)
+}
+
+// SetLocalRuleListErrors records the most recent load error for each configured
+// local rule list (key: strings.TrimSpace(rl.Path) of lists with an empty URL;
+// an empty value means the last load succeeded). Called by the proxy after
+// every ReloadFromConfig; consumed by the rule-lists API.
+func (a *Admin) SetLocalRuleListErrors(m map[string]string) {
+	if a == nil {
+		return
+	}
+	cp := make(map[string]string, len(m))
+	for k, v := range m {
+		cp[k] = v
+	}
+	a.localRuleListErrs.Store(cp)
+}
+
+func (a *Admin) localRuleListErrors() map[string]string {
+	if a == nil {
+		return nil
+	}
+	if v := a.localRuleListErrs.Load(); v != nil {
+		if m, ok := v.(map[string]string); ok {
+			return m
+		}
+	}
+	return nil
+}
+
+// SetNonLoopbackWarning sets (or clears, with an empty msg) the warning shown
+// as a banner in the admin UI when the proxy listens on a non-loopback address.
+// Called by the proxy on startup and on hot reload.
+func (a *Admin) SetNonLoopbackWarning(msg string) {
+	if a == nil {
+		return
+	}
+	a.nonLoopbackWarn.Store(msg)
+}
+
+func (a *Admin) nonLoopbackWarning() string {
+	if a == nil {
+		return ""
+	}
+	if v := a.nonLoopbackWarn.Load(); v != nil {
+		if s, ok := v.(string); ok {
+			return s
+		}
+	}
+	return ""
+}
+
+// SetRedactTester registers the dry-run redaction callback used by
+// POST /manager/api/test. The callback returns the redacted text and the hits
+// (TestHit.Preview must already be masked; the raw value is never returned).
+// Passing nil disables the endpoint (it then answers 503).
+func (a *Admin) SetRedactTester(fn func(text string) (redacted string, hits []TestHit)) {
+	if a == nil {
+		return
+	}
+	a.redactTester.Store(fn)
+}
+
+func (a *Admin) getRedactTester() func(text string) (redacted string, hits []TestHit) {
+	if a == nil {
+		return nil
+	}
+	if v := a.redactTester.Load(); v != nil {
+		if fn, ok := v.(func(text string) (redacted string, hits []TestHit)); ok {
+			return fn
+		}
+	}
+	return nil
 }
 
 // RecordAudit records one audit event about whether redaction rules were hit.
@@ -252,6 +337,7 @@ func adminToDBMatches(in []AuditMatch, persistRaw bool) []auditdb.AuditMatch {
 		}
 		out[i] = auditdb.AuditMatch{
 			Category:    in[i].Category,
+			Source:      in[i].Source,
 			Placeholder: in[i].Placeholder,
 			Value:       value,
 			IsPreview:   isPreview,

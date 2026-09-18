@@ -91,6 +91,7 @@
   </style>
 </head>
 <body class="bg-white text-text min-h-screen overflow-x-hidden">
+  <div id="global-warning-banner" style="display:none"></div>
   <div id="app" class="flex min-h-screen">
     <aside class="w-64 bg-white border-r border-border flex flex-col h-screen sticky top-0 self-start shrink-0">
       <div class="p-6 border-b border-border">
@@ -258,6 +259,8 @@ const i18n = {
 	    'ruleLists.verifyOk': '同步正常',
 	    'ruleLists.verifyPending': '尚未同步',
 	    'ruleLists.verifyFailed': '同步失败',
+	    'ruleLists.consecutiveFailures': '连续失败 {n} 次',
+	    'ruleLists.consecutiveFailuresHint': '订阅连续多次同步失败：请检查网络、订阅 URL 与日志。',
     'ruleLists.kind.subscription': '订阅',
     'ruleLists.kind.local': '本地',
     'ruleLists.enabled': '已启用',
@@ -372,11 +375,13 @@ const i18n = {
     'certs.trustHint': '如需安装到系统信任库（sudo，推荐用于 Codex/CLI），请在终端运行：vibeguard trust --mode system',
     'certs.trustDockerHint': '检测到容器部署：无法自动检测/安装“宿主机”的信任状态。请按 Docker 部署章节导出 ca.crt 并在宿主机信任。',
     'certs.regenerate': '重新生成 CA',
-    'certs.regenerateNote': '注意：重新生成 CA 将使所有现有证书失效，需要重新信任。',
+    'certs.regenerateNote': '注意：重新生成 CA 将使所有现有证书失效并需重新信任；旧 CA 会备份为 *.bak，但旧会话映射（WAL）与配置中加密存储的关键词将无法解密。',
     'certs.trustedSuccess': 'CA 证书已安装到用户信任库！',
-    'certs.regenerateConfirm': '确定重新生成 CA 证书？',
+    'certs.regenerateConfirm': '确定重新生成 CA 证书？旧会话映射（WAL）与加密关键词将无法解密，客户端需重新信任新 CA。',
     'certs.regenerated': 'CA 证书已重新生成！',
     'certs.failed': '操作失败：',
+    'banner.warning': '警告',
+    'banner.nonLoopback.prefix': '当前代理监听在非回环地址，管理接口可能对网络暴露。服务端提示：',
     'logs.title': '调试日志',
     'logs.subtitle': '查看后端运行日志（用于排查连接、证书、SSE 等问题）',
     'logs.configuredPath': '配置路径',
@@ -463,6 +468,7 @@ const i18n = {
     'audit.clearFailed': '清空失败',
     'audit.metaLen': '长度',
     'audit.metaTrunc': '已截断',
+    'audit.metaSource': '来源',
     'audit.detail.title': '请求详情',
     'audit.detail.close': '关闭',
     'audit.detail.request': '请求',
@@ -481,7 +487,20 @@ const i18n = {
     'audit.detail.notFound': '未找到该记录（可能已被清理）',
     'audit.autoscroll': '自动滚动到底部',
     'audit.connecting': '正在连接...',
-    'audit.reconnecting': '连接断开，正在重连...'
+    'audit.reconnecting': '连接断开，正在重连...',
+    'test.title': '脱敏试跑',
+    'test.subtitle': '输入一段文本，用当前已加载的规则试跑脱敏（本地干跑，不会发送到上游）。',
+    'test.placeholder': '粘贴或输入要测试的文本…',
+    'test.run': '试跑',
+    'test.redacted': '脱敏后文本',
+    'test.hits': '命中明细',
+    'test.category': '分类',
+    'test.source': '来源',
+    'test.placeholderCol': '占位符',
+    'test.preview': '预览',
+    'test.noHits': '未命中任何规则',
+    'test.empty': '请输入要测试的文本',
+    'test.failed': '试跑失败'
   },
 	  en: {
 	    'app.title': 'VibeGuard Admin Panel',
@@ -576,6 +595,8 @@ const i18n = {
 	    'ruleLists.verifyOk': 'Synced',
 	    'ruleLists.verifyPending': 'Not synced',
 	    'ruleLists.verifyFailed': 'Sync failed',
+	    'ruleLists.consecutiveFailures': 'Failed {n}× in a row',
+	    'ruleLists.consecutiveFailuresHint': 'The subscription has failed to sync repeatedly: check your network, the subscription URL, and the logs.',
     'ruleLists.kind.subscription': 'Subscription',
     'ruleLists.kind.local': 'Local',
     'ruleLists.enabled': 'Enabled',
@@ -690,11 +711,13 @@ const i18n = {
     'certs.trustHint': 'To install into the system trust store (sudo, recommended for Codex/CLI), run: vibeguard trust --mode system',
     'certs.trustDockerHint': 'Container detected: VibeGuard cannot check/install the host trust store. Export ca.crt and trust it on your host.',
     'certs.regenerate': 'Regenerate CA',
-    'certs.regenerateNote': 'Note: Regenerating the CA will invalidate all existing certificates.',
+    'certs.regenerateNote': 'Note: Regenerating the CA invalidates all existing certificates and requires re-trust. The old CA is backed up as *.bak, but existing session mappings (WAL) and encrypted keywords stored in the config become undecryptable.',
     'certs.trustedSuccess': 'CA certificate installed to user trust store!',
-    'certs.regenerateConfirm': 'Regenerate CA certificate?',
+    'certs.regenerateConfirm': 'Regenerate the CA? Existing session mappings (WAL) and encrypted keywords become undecryptable, and clients must re-trust the new CA.',
     'certs.regenerated': 'CA certificate regenerated!',
     'certs.failed': 'Failed: ',
+    'banner.warning': 'Warning',
+    'banner.nonLoopback.prefix': 'The proxy is listening on a non-loopback address; the admin API may be exposed to the network. Server message: ',
     'logs.title': 'Debug Logs',
     'logs.subtitle': 'View backend logs for troubleshooting (TLS, SSE, connectivity, etc.)',
     'logs.configuredPath': 'Configured path',
@@ -781,6 +804,7 @@ const i18n = {
     'audit.clearFailed': 'Failed to clear',
     'audit.metaLen': 'len',
     'audit.metaTrunc': 'truncated',
+    'audit.metaSource': 'Source',
     'audit.detail.title': 'Request details',
     'audit.detail.close': 'Close',
     'audit.detail.request': 'Request',
@@ -799,7 +823,20 @@ const i18n = {
     'audit.detail.notFound': 'Record not found (may have been cleared)',
     'audit.autoscroll': 'Auto-scroll to bottom',
     'audit.connecting': 'Connecting...',
-    'audit.reconnecting': 'Disconnected, reconnecting...'
+    'audit.reconnecting': 'Disconnected, reconnecting...',
+    'test.title': 'Redaction dry run',
+    'test.subtitle': 'Enter text to dry-run redaction with the currently loaded rules (local only; nothing is sent upstream).',
+    'test.placeholder': 'Paste or type text to test...',
+    'test.run': 'Run test',
+    'test.redacted': 'Redacted text',
+    'test.hits': 'Hits',
+    'test.category': 'Category',
+    'test.source': 'Source',
+    'test.placeholderCol': 'Placeholder',
+    'test.preview': 'Preview',
+    'test.noHits': 'No rules hit',
+    'test.empty': 'Enter some text to test',
+    'test.failed': 'Test failed'
   }
 };
 
@@ -880,8 +917,45 @@ async function initLang() {
 
 const state = { stats: { proxy: {}, session: {}, requests: {} }, patterns: { keywords: [], regex: [], builtin: [], exclude: [], secret_files: [] }, rule_lists: [], ui: { patterns_tab: 'rule_lists' }, ner: { enabled: false, presidio_url: '', language: 'en', entities: [], min_score: 0 }, sessions: { total: 0, mappings: [] }, certs: { ca: {} }, audit: { redact_log: true, max_events: 200, events: [], persistence: { available: false, enabled: false, path: '', retention: '' } }, logs: { configured_path: '', effective_path: '', exists: false, lines: [], warning: '' }, debug: { status: { enabled: false, max_body_bytes: 1048576, max_events: 50, mask_headers: true, count: 0 }, events: [] }, settings: { proxy: { websocket_redaction_beta: false } } };
 state.auth = { configured: false, authenticated: false, broken: false, broken_error: '' };
+state.nonLoopbackWarning = '';
 let auditES = null;
 let logsES = null;
+
+// Non-loopback listen warning: fetched from the public GET /manager/api/settings
+// (available before login) and rendered as a top-of-page banner.
+async function loadSecurityWarning() {
+  try {
+    const r = await fetch('/manager/api/settings', { cache: 'no-store' });
+    if (r.ok) {
+      const j = await r.json();
+      state.nonLoopbackWarning = String(j?.non_loopback_warning || '').trim();
+    }
+  } catch (e) { /* ignore */ }
+  renderNonLoopbackBanner();
+}
+function renderNonLoopbackBanner() {
+  const box = document.getElementById('global-warning-banner');
+  if (!box) return;
+  let dismissed = false;
+  try { dismissed = sessionStorage.getItem('vibeguard.nlb.dismissed') === '1'; } catch (e) { /* ignore */ }
+  const msg = String(state.nonLoopbackWarning || '').trim();
+  if (!msg || dismissed) {
+    box.style.display = 'none';
+    box.innerHTML = '';
+    return;
+  }
+  box.style.display = 'block';
+  box.innerHTML =
+    '<div class="flex items-start gap-3 px-4 py-3 text-sm text-white" style="background:#b91c1c;">' +
+      '<span class="font-semibold shrink-0">' + esc(t('banner.warning')) + '</span>' +
+      '<span class="flex-1 break-words">' + esc(t('banner.nonLoopback.prefix')) + esc(msg) + '</span>' +
+      '<button type="button" onclick="dismissNonLoopbackBanner()" class="shrink-0 px-2 rounded hover:opacity-70" aria-label="close" style="background:transparent;border:none;color:#fff;font-size:16px;line-height:1;">&times;</button>' +
+    '</div>';
+}
+function dismissNonLoopbackBanner() {
+  try { sessionStorage.setItem('vibeguard.nlb.dismissed', '1'); } catch (e) { /* ignore */ }
+  renderNonLoopbackBanner();
+}
 async function throwHttpError(r) {
   let detail = '';
   try { detail = (await r.text()).trim(); } catch (e) { /* ignore */ }
@@ -948,21 +1022,24 @@ async function ensureAuthedOrShowAuth() {
   setLogoutVisible(true);
   return true;
 }
+// Custom header required by the admin CSRF middleware for every non-GET API call
+// (cross-site forms cannot send it; cross-origin JS fails the CORS preflight).
+const ADMIN_REQUEST_HEADERS = { 'X-VG-Admin-Request': '1' };
 const api = {
   async get(p) {
-    const r = await fetch('/manager/api' + p, { cache: 'no-store', credentials: 'same-origin' });
+    const r = await fetch('/manager/api' + p, { cache: 'no-store', credentials: 'same-origin', headers: ADMIN_REQUEST_HEADERS });
     if (r.status === 401 || r.status === 403) { await refreshAuthStatus(); await ensureAuthedOrShowAuth(); }
     if (!r.ok) await throwHttpError(r);
     return r.json();
   },
   async post(p, b) {
-    const r = await fetch('/manager/api' + p, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(b), credentials: 'same-origin' });
+    const r = await fetch('/manager/api' + p, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-VG-Admin-Request': '1' }, body: JSON.stringify(b), credentials: 'same-origin' });
     if (r.status === 401 || r.status === 403) { await refreshAuthStatus(); await ensureAuthedOrShowAuth(); }
     if (!r.ok) await throwHttpError(r);
     return r.json();
   },
   async del(p) {
-    const r = await fetch('/manager/api' + p, { method: 'DELETE', credentials: 'same-origin' });
+    const r = await fetch('/manager/api' + p, { method: 'DELETE', credentials: 'same-origin', headers: ADMIN_REQUEST_HEADERS });
     if (r.status === 401 || r.status === 403) { await refreshAuthStatus(); await ensureAuthedOrShowAuth(); }
     if (!r.ok) await throwHttpError(r);
     return r;
@@ -1126,7 +1203,7 @@ async function authSetup() {
   if (v1 !== v2) { toast(t('auth.mismatch'), 'error'); return; }
   if (v1.length < 8) { toast(t('auth.tooShort'), 'error'); return; }
   try {
-    const r = await fetch('/manager/api/auth/setup', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ password: v1 }), credentials: 'same-origin' });
+    const r = await fetch('/manager/api/auth/setup', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-VG-Admin-Request': '1' }, body: JSON.stringify({ password: v1 }), credentials: 'same-origin' });
     if (!r.ok) await throwHttpError(r);
     await refreshAuthStatus();
     toast(t('auth.setup.success'));
@@ -1141,7 +1218,7 @@ async function authLogin() {
   const v = (p?.value || '').trim();
   if (!v) { toast(t('auth.required'), 'error'); return; }
   try {
-    const r = await fetch('/manager/api/auth/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ password: v }), credentials: 'same-origin' });
+    const r = await fetch('/manager/api/auth/login', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-VG-Admin-Request': '1' }, body: JSON.stringify({ password: v }), credentials: 'same-origin' });
     if (!r.ok) await throwHttpError(r);
     await refreshAuthStatus();
     toast(t('auth.login.success'));
@@ -1153,7 +1230,7 @@ async function authLogin() {
 
 async function authLogout() {
   try {
-    await fetch('/manager/api/auth/logout', { method: 'POST', credentials: 'same-origin' });
+    await fetch('/manager/api/auth/logout', { method: 'POST', credentials: 'same-origin', headers: { 'X-VG-Admin-Request': '1' } });
   } catch (e) { /* ignore */ }
   await refreshAuthStatus();
   toast(t('auth.logout.success'));
@@ -1451,9 +1528,10 @@ function renderAuditList() {
         matches.map(m => {
           const title = m.placeholder ? (' title="' + esc(m.placeholder) + '"') : '';
           const cat = '<span class="tag tag-blue">' + esc(m.category || '') + '</span>';
+          const src = m.source ? ('<span class="text-xs text-muted">' + esc(t('audit.metaSource')) + ': ' + esc(m.source) + '</span>') : '';
           const val = '<code class="text-xs bg-white px-2 py-1 rounded border border-border"' + title + '>' + esc(auditDisplayMatchValue(m)) + '</code>';
           const meta = '<span class="text-xs text-muted">' + esc(t('audit.metaLen')) + '=' + esc(String(m.length || 0)) + (m.truncated ? (' · ' + esc(t('audit.metaTrunc'))) : '') + '</span>';
-          return '<div class="flex items-center gap-2 bg-surface rounded border border-border px-2 py-1">' + cat + val + meta + '</div>';
+          return '<div class="flex items-center gap-2 bg-surface rounded border border-border px-2 py-1">' + cat + src + val + meta + '</div>';
         }).join('') +
       '</div>'
     );
@@ -1516,8 +1594,10 @@ function showAuditDetail(id) {
         const isPreviewDisplay = !!state.audit.redact_log || !!m.is_preview;
         const mode = isPreviewDisplay ? ('<span class="tag tag-yellow">' + t('audit.detail.preview') + '</span>') : ('<span class="tag tag-red">' + t('audit.detail.original') + '</span>');
         const meta = '<span class="text-xs text-muted">' + esc(t('audit.metaLen')) + '=' + esc(String(m.length || 0)) + (m.truncated ? (' · ' + esc(t('audit.metaTrunc'))) : '') + '</span>';
+        const srcRow = m.source ? ('<div class="text-sm"><span class="text-muted">' + t('audit.metaSource') + '</span><div class="mt-1"><code class="text-xs bg-white px-2 py-1 rounded border border-border break-all">' + esc(m.source) + '</code></div></div>') : '';
         return '<div class="flex flex-col gap-2 p-3 bg-surface rounded-lg border border-border">' +
           '<div class="flex flex-wrap items-center gap-2">' + cat + mode + meta + '</div>' +
+          srcRow +
           '<div class="text-xs text-muted">' + t('audit.detail.placeholder') + '</div>' +
           '<div>' + ph + '</div>' +
           '<div class="text-xs text-muted">' + t('audit.detail.value') + '</div>' +
@@ -1830,8 +1910,60 @@ async function renderLogs() {
 	        '</div>' +
 	      '</div>' +
 	      '<div id="rule-lists-list" class="space-y-2"><div class="text-muted text-sm py-4 text-center">' + t('patterns.loading') + '</div></div>' +
+	    '</div>' +
+	    '<div class="card p-6 mt-6">' +
+	      '<h3 class="font-semibold text-text">' + t('test.title') + '</h3>' +
+	      '<p class="text-xs text-muted mt-1">' + t('test.subtitle') + '</p>' +
+	      '<textarea id="redact-test-input" rows="4" class="w-full mt-4 font-mono text-sm" placeholder="' + esc(t('test.placeholder')) + '"></textarea>' +
+	      '<div class="mt-3"><button class="btn btn-primary text-sm" onclick="runRedactTest()">' + t('test.run') + '</button></div>' +
+	      '<div id="redact-test-result" class="mt-4" style="display:none"></div>' +
 	    '</div>';
 	  await loadRuleLists();
+	}
+
+	async function runRedactTest() {
+	  const ta = document.getElementById('redact-test-input');
+	  const text = ta ? ta.value : '';
+	  if (!String(text).trim()) { toast(t('test.empty'), 'error'); return; }
+	  try {
+	    const res = await api.post('/test', { text: text });
+	    renderRedactTestResult(res);
+	  } catch (e) {
+	    toast(t('test.failed') + ': ' + e.message, 'error');
+	  }
+	}
+
+	function renderRedactTestResult(res) {
+	  const box = document.getElementById('redact-test-result');
+	  if (!box) return;
+	  const matches = Array.isArray(res?.matches) ? res.matches : [];
+	  const rows = matches.map(m => {
+	    return '<tr class="table-row">' +
+	      '<td class="py-2 pr-3"><span class="tag tag-blue">' + esc(m.category || '') + '</span></td>' +
+	      '<td class="py-2 pr-3 text-xs text-muted">' + esc(m.source || '-') + '</td>' +
+	      '<td class="py-2 pr-3"><code class="text-xs break-all">' + esc(m.placeholder || '') + '</code></td>' +
+	      '<td class="py-2 pr-3"><code class="text-xs break-all">' + esc(m.preview || '') + '</code></td>' +
+	      '<td class="py-2 text-xs text-muted">' + esc(String(m.length || 0)) + '</td>' +
+	    '</tr>';
+	  }).join('');
+	  const table = matches.length === 0 ? ('<div class="text-sm text-muted">' + t('test.noHits') + '</div>') : (
+	    '<div class="overflow-x-auto"><table class="w-full text-left">' +
+	      '<thead><tr class="text-xs text-muted">' +
+	        '<th class="py-1 pr-3 font-medium">' + t('test.category') + '</th>' +
+	        '<th class="py-1 pr-3 font-medium">' + t('test.source') + '</th>' +
+	        '<th class="py-1 pr-3 font-medium">' + t('test.placeholderCol') + '</th>' +
+	        '<th class="py-1 pr-3 font-medium">' + t('test.preview') + '</th>' +
+	        '<th class="py-1 font-medium">' + t('audit.metaLen') + '</th>' +
+	      '</tr></thead>' +
+	      '<tbody>' + rows + '</tbody>' +
+	    '</table></div>'
+	  );
+	  box.style.display = 'block';
+	  box.innerHTML =
+	    '<div class="text-xs text-muted mb-1">' + t('test.redacted') + '</div>' +
+	    '<pre class="text-xs bg-surface border border-border rounded p-3 whitespace-pre-wrap break-words font-mono mb-4">' + esc(res?.redacted ?? '') + '</pre>' +
+	    '<div class="text-xs text-muted mb-1">' + t('test.hits') + ' (' + matches.length + ')</div>' +
+	    table;
 	}
 
 		async function renderKeywordsPage() {
@@ -1932,7 +2064,8 @@ function normalizeRuleLists(raw) {
     verified: !!(it?.verified ?? it?.Verified),
     last_error: String(it?.last_error ?? it?.LastError ?? ''),
     checked_at: Number(it?.checked_at ?? it?.CheckedAt ?? 0),
-    updated_at: Number(it?.updated_at ?? it?.UpdatedAt ?? 0)
+    updated_at: Number(it?.updated_at ?? it?.UpdatedAt ?? 0),
+    consecutive_failures: Number(it?.consecutive_failures ?? it?.ConsecutiveFailures ?? 0)
   })).filter(it => (it.id || it.path || it.url));
 }
 
@@ -1959,11 +2092,21 @@ function renderRuleListsList() {
     const statusClass = on ? 'tag-green' : 'tag-yellow';
     const missing = rl.exists ? '' : '<span class="tag tag-red">' + t('ruleLists.missing') + '</span>';
     const kindTag = '<span class="tag tag-blue">' + esc(kind === 'subscription' ? t('ruleLists.kind.subscription') : t('ruleLists.kind.local')) + '</span>';
+    const errMsg = String(rl.last_error || '').trim();
     let verifyTag = '';
     if (kind === 'subscription') {
-      if (String(rl.last_error || '').trim() !== '') verifyTag = '<span class="tag tag-red">' + t('ruleLists.verifyFailed') + '</span>';
+      if (errMsg !== '') verifyTag = '<span class="tag tag-red">' + t('ruleLists.verifyFailed') + '</span>';
       else if (!!rl.verified) verifyTag = '<span class="tag tag-green">' + t('ruleLists.verifyOk') + '</span>';
       else verifyTag = '<span class="tag tag-yellow">' + t('ruleLists.verifyPending') + '</span>';
+    } else if (errMsg !== '') {
+      // Local lists: surface load failures reported by the proxy (not just subscriptions).
+      verifyTag = '<span class="tag tag-red">' + t('ruleLists.verifyFailed') + '</span>';
+    }
+    // Subscription sync repeatedly failing: prominent warning in addition to last_error.
+    const cf = Number(rl.consecutive_failures || 0);
+    let cfTag = '';
+    if (kind === 'subscription' && cf >= 2) {
+      cfTag = '<span class="tag tag-red" title="' + esc(t('ruleLists.consecutiveFailuresHint')) + '">' + esc(t('ruleLists.consecutiveFailures').replace('{n}', String(cf))) + '</span>';
     }
     const canDelete = String(rl.id || '').trim() !== '';
     const delBtn = canDelete
@@ -1972,7 +2115,6 @@ function renderRuleListsList() {
 
     const src = String(rl.url || rl.path || '');
     const srcHtml = src ? ('<div class="text-xs text-muted mt-3 font-mono break-all">' + esc(src) + '</div>') : '';
-    const errMsg = String(rl.last_error || '').trim();
     const errHtml = errMsg ? ('<div class="text-xs text-danger mt-2 break-words">' + esc(errMsg) + '</div>') : '';
 
     return '' +
@@ -1983,6 +2125,7 @@ function renderRuleListsList() {
             kindTag +
             missing +
             verifyTag +
+            cfTag +
           '</div>' +
           '<div class="mt-3 grid grid-cols-1 md:grid-cols-2 gap-3">' +
             '<div>' +
@@ -2155,7 +2298,7 @@ async function uploadRuleList(file, name, priority) {
   fd.append('priority', String(priority || 50));
 
   try {
-    const r = await fetch('/manager/api/rule_lists/upload', { method: 'POST', body: fd, credentials: 'same-origin' });
+    const r = await fetch('/manager/api/rule_lists/upload', { method: 'POST', body: fd, credentials: 'same-origin', headers: { 'X-VG-Admin-Request': '1' } });
     if (r.status === 401 || r.status === 403) { await refreshAuthStatus(); await ensureAuthedOrShowAuth(); }
     if (!r.ok) await throwHttpError(r);
     toast(t('ruleLists.uploaded'));
@@ -3005,7 +3148,7 @@ async function renderSettings() {
 }
 
 async function renderCerts() {
-  document.getElementById('main-content').innerHTML = '<div class="mb-8"><h2 class="text-2xl font-bold text-text">' + t('certs.title') + '</h2><p class="text-muted mt-1">' + t('certs.subtitle') + '</p></div><div class="card p-6"><h3 class="font-semibold text-text mb-4">' + t('certs.caCert') + '</h3><div id="cert-info" class="space-y-3"><div class="text-muted text-sm py-4">' + t('patterns.loading') + '</div></div></div><div class="card p-6 mt-6"><h3 class="font-semibold text-text mb-4">' + t('certs.actions') + '</h3><div class="flex gap-4"><button id="cert-install-trust-btn" class="btn btn-primary" onclick="trustCert()">' + t('certs.installTrust') + '</button><button class="btn btn-danger" onclick="regenerateCert()">' + t('certs.regenerate') + '</button></div><p id="cert-trust-hint" class="text-muted text-sm mt-4">' + t('certs.trustHint') + '</p><p class="text-muted text-sm mt-2">' + t('certs.regenerateNote') + '</p></div>';
+  document.getElementById('main-content').innerHTML = '<div class="mb-8"><h2 class="text-2xl font-bold text-text">' + t('certs.title') + '</h2><p class="text-muted mt-1">' + t('certs.subtitle') + '</p></div><div class="card p-6"><h3 class="font-semibold text-text mb-4">' + t('certs.caCert') + '</h3><div id="cert-info" class="space-y-3"><div class="text-muted text-sm py-4">' + t('patterns.loading') + '</div></div></div><div class="card p-6 mt-6"><h3 class="font-semibold text-text mb-4">' + t('certs.actions') + '</h3><div class="flex gap-4"><button id="cert-install-trust-btn" class="btn btn-primary" onclick="trustCert()">' + t('certs.installTrust') + '</button><button class="btn btn-danger" onclick="regenerateCert()">' + t('certs.regenerate') + '</button></div><p id="cert-trust-hint" class="text-muted text-sm mt-4">' + t('certs.trustHint') + '</p><p class="text-muted text-sm mt-2">' + t('certs.regenerateNote') + '</p><div id="cert-regen-result" class="mt-4" style="display:none"></div></div>';
   await loadCerts();
 }
 async function loadCerts() { try { state.certs = await api.get('/certificates'); renderCertInfo(); } catch (e) { console.error(e); } }
@@ -3033,7 +3176,15 @@ function renderCertInfo() {
     '<div class="flex justify-between gap-4"><span class="text-muted">' + t('certs.certPath') + '</span><code class="text-sm break-all text-right max-w-[65%]">' + esc(ca.cert_path || '-') + '</code></div>';
 }
 async function trustCert() { try { await api.post('/certificates/trust'); toast(t('certs.trustedSuccess')); await loadCerts(); } catch (e) { toast(t('certs.failed') + e.message, 'error'); } }
-async function regenerateCert() { if (!confirm(t('certs.regenerateConfirm'))) return; try { await api.post('/certificates/regenerate'); toast(t('certs.regenerated')); await loadCerts(); } catch (e) { toast(t('certs.failed') + e.message, 'error'); } }
+async function regenerateCert() { if (!confirm(t('certs.regenerateConfirm'))) return; try { const res = await api.post('/certificates/regenerate'); showCertRegenResult(res?.message || t('certs.regenerated')); await loadCerts(); } catch (e) { toast(t('certs.failed') + e.message, 'error'); } }
+function showCertRegenResult(msg) {
+  const box = document.getElementById('cert-regen-result');
+  if (!box) return;
+  box.style.display = 'block';
+  box.className = 'mt-4 p-4 rounded-lg border text-sm break-words';
+  box.style.cssText = 'display:block;white-space:pre-line;background:#fef2f2;border:1px solid #fecaca;color:#991b1b;';
+  box.textContent = msg;
+}
 
 async function loadDebug() {
   const d = await api.get('/debug/events?limit=200');
@@ -3317,9 +3468,11 @@ window.setLang = setLang;
 window.authSetup = authSetup;
 window.authLogin = authLogin;
 window.authLogout = authLogout;
+window.runRedactTest = runRedactTest;
+window.dismissNonLoopbackBanner = dismissNonLoopbackBanner;
 
 window.addEventListener('hashchange', route);
-initLang().then(refreshAuthStatus).then(ensureAuthedOrShowAuth).then(route).catch(route);
+initLang().then(loadSecurityWarning).then(refreshAuthStatus).then(ensureAuthedOrShowAuth).then(route).catch(route);
   </script>
 </body>
 </html>

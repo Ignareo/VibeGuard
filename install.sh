@@ -808,6 +808,28 @@ ensure_path_in_rc() {
   } >>"${rc}"
 }
 
+ensure_assistant_aliases_in_rc() {
+  # Add convenience aliases so `kimi`/`opencode` run through the proxy automatically.
+  # Idempotent via the marker: existing VibeGuard alias blocks are not duplicated.
+  local rc="${1:-}"
+  local marker="# VibeGuard ALIASES"
+
+  [[ -n "${rc}" ]] || return 1
+
+  if [[ -f "${rc}" ]]; then
+    if grep -Fqs "${marker}" "${rc}"; then
+      return 0
+    fi
+  fi
+
+  {
+    echo ""
+    echo "${marker}"
+    echo "alias kimi='vibeguard kimi'"
+    echo "alias opencode='vibeguard opencode'"
+  } >>"${rc}"
+}
+
 detect_listen_from_config() {
   local cfg="${1:-}"
   [[ -f "${cfg}" ]] || return 1
@@ -1393,6 +1415,25 @@ fi
 say "启动后台代理" "Starting proxy in background"
 if ! VIBEGUARD_LANG="${SCRIPT_LANG}" "${VG}" start; then
   say "后台代理启动失败（你可稍后手动运行：vibeguard start --foreground）" "Failed to start proxy (you can run: vibeguard start --foreground)"
+fi
+
+# Optional: shell aliases so common CLI assistants run through VibeGuard (native install only).
+if can_prompt; then
+  rc_file="$(detect_shell_rc || true)"
+  if [[ -z "${rc_file}" ]]; then
+    say "未识别你的 Shell：跳过 alias 写入（可手动添加：alias kimi='vibeguard kimi'）" "Shell not recognized: skipping alias setup (add manually: alias kimi='vibeguard kimi')"
+  else
+    echo ""
+    ans="$(prompt "$(t "是否为常用 CLI 助手创建 alias（kimi='vibeguard kimi'、opencode='vibeguard opencode'）到 ${rc_file}？[y/N]: " "Create aliases for common CLI assistants (kimi='vibeguard kimi', opencode='vibeguard opencode') in ${rc_file}? [y/N]: ")" "N")"
+    ans="$(to_lower "${ans:-n}")"
+    if [[ "${ans}" == "y" || "${ans}" == "yes" ]]; then
+      ensure_assistant_aliases_in_rc "${rc_file}"
+      say "已写入 alias：${rc_file}" "Aliases written: ${rc_file}"
+      say "请执行：source \"${rc_file}\"（或重开终端）" "Run: source \"${rc_file}\" (or restart your terminal)"
+    else
+      say "已跳过 alias 写入" "Skipped alias setup"
+    fi
+  fi
 fi
 
 say "安装完成" "Done"
