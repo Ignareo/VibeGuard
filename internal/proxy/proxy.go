@@ -186,11 +186,18 @@ func (s *Server) Start() error {
 	adminHandler := s.admin.Handler()
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r != nil {
-			if r.URL.Path == "/manager" {
+			// Threat model: a client using VibeGuard as an HTTP proxy sends
+			// absolute-form request targets (e.g. "GET http://anyhost/manager/api/..."),
+			// where r.URL.Host is non-empty. Routing on the path prefix alone would
+			// then expose the admin UI to requests for arbitrary hosts and widen the
+			// CSRF surface. Only origin-form requests (r.URL.Host == "", i.e. a client
+			// connecting directly) may reach the admin handler.
+			originForm := r.URL.Host == ""
+			if originForm && r.URL.Path == "/manager" {
 				http.Redirect(w, r, "/manager/", http.StatusMovedPermanently)
 				return
 			}
-			if strings.HasPrefix(r.URL.Path, "/manager/") {
+			if originForm && strings.HasPrefix(r.URL.Path, "/manager/") {
 				adminHandler.ServeHTTP(w, r)
 				return
 			}
@@ -198,6 +205,7 @@ func (s *Server) Start() error {
 		s.proxy.ServeHTTP(w, r)
 	})
 
+	s.warnNonLoopbackListen()
 	slog.Info("Starting VibeGuard proxy", "address", s.listenAddr, "manager", "http://"+s.listenAddr+"/manager/")
 	return http.ListenAndServe(s.listenAddr, handler)
 }
@@ -212,6 +220,45 @@ func (s *Server) Stop() {
 		s.admin.Close()
 	}
 	slog.Info("VibeGuard proxy stopped")
+}
+
+// isNonLoopbackListen reports whether a listen address would expose the proxy
+// (and the admin UI served on the same port) beyond the local machine.
+// Anything that cannot be proven loopback — empty host, wildcard addresses
+// (0.0.0.0 / ::), non-loopback IPs, non-localhost hostnames, or an address that
+// fails to parse — is treated as non-loopback (fail closed toward warning).
+func isNonLoopbackListen(addr string) bool {
+	host, _, err := net.SplitHostPort(strings.TrimSpace(addr))
+	if err != nil {
+		return true
+	}
+	host = strings.Trim(strings.TrimSpace(host), "[]")
+	if host == "" {
+		return true
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		return !ip.IsLoopback()
+	}
+	return !strings.EqualFold(host, "localhost")
+}
+
+// warnNonLoopbackListen checks the configured listen address and mirrors the
+// outcome into the admin UI via SetNonLoopbackWarning. Note: an already-bound
+// listen socket is only replaced on restart, so this reflects the current
+// configured value (c.Proxy.Listen), not necessarily the effective socket.
+func (s *Server) warnNonLoopbackListen() {
+	addr := strings.TrimSpace(s.config.Get().Proxy.Listen)
+	if !isNonLoopbackListen(addr) {
+		if s.admin != nil {
+			s.admin.SetNonLoopbackWarning("")
+		}
+		return
+	}
+	slog.Warn("Proxy is listening on a non-loopback address; the admin UI and proxied traffic are exposed to the network. Consider binding to 127.0.0.1",
+		"address", addr)
+	if s.admin != nil {
+		s.admin.SetNonLoopbackWarning("非 loopback 监听：管理页与代理监听已暴露给网络，建议绑定 127.0.0.1。Non-loopback listen: the admin UI and proxy are exposed to the network; bind 127.0.0.1 instead.")
+	}
 }
 
 func (s *Server) runtimeSnapshot() runtimeConfig {
@@ -388,6 +435,7 @@ func buildAuditMatches(redactLog bool, matches []redact.Match) []admin.AuditMatc
 
 		out = append(out, admin.AuditMatch{
 			Category:    m.Category,
+			Source:      m.Source,
 			Placeholder: m.Placeholder,
 			Value:       value,
 			IsPreview:   isPreview,
@@ -1333,12 +1381,18 @@ func (s *Server) applyConfig(c config.Config) {
 	for _, err := range inlineErrs {
 		slog.Error("Invalid patterns.regex/builtin entry", "error", err)
 	}
+	// Load results of local rule lists (URL empty), keyed by TrimSpace(rl.Path):
+	// the most recent load error, or "" on success. Rebuilt from scratch on every
+	// reload and pushed to the admin UI; subscription lists are excluded (their
+	// status is tracked via SubscriptionMeta instead).
+	localRuleListErrs := make(map[string]string)
 	for _, rl := range c.Patterns.RuleLists {
 		if !rl.Enabled {
 			continue
 		}
+		isLocal := strings.TrimSpace(rl.URL) == ""
 		path := ""
-		if strings.TrimSpace(rl.URL) != "" {
+		if !isLocal {
 			if p, ok := rulelists.SubscriptionRulesPath(rl); ok {
 				path = p
 			}
@@ -1346,6 +1400,10 @@ func (s *Server) applyConfig(c config.Config) {
 			path = resolveRuleListPath(rl.Path)
 		}
 		if strings.TrimSpace(path) == "" {
+			if isLocal {
+				// An enabled local list with no usable path failed to load.
+				localRuleListErrs[strings.TrimSpace(rl.Path)] = "rule list path is empty"
+			}
 			continue
 		}
 		name := strings.TrimSpace(rl.Name)
@@ -1356,10 +1414,11 @@ func (s *Server) applyConfig(c config.Config) {
 			name = filepath.Base(path)
 		}
 		if _, err := os.Stat(path); err != nil {
-			if strings.TrimSpace(rl.URL) != "" {
+			if !isLocal {
 				slog.Warn("Rule list subscription not available yet; continuing without it", "url", rl.URL)
 			} else {
 				slog.Warn("Rule list file not found; continuing without it", "path", rl.Path)
+				localRuleListErrs[strings.TrimSpace(rl.Path)] = err.Error()
 			}
 			continue
 		}
@@ -1368,14 +1427,23 @@ func (s *Server) applyConfig(c config.Config) {
 			Priority: rl.Priority,
 		})
 		if err != nil {
-			if strings.TrimSpace(rl.URL) != "" {
+			if !isLocal {
 				slog.Warn("Failed to load rule list subscription; continuing without it", "error", err, "url", rl.URL)
 			} else {
 				slog.Warn("Failed to load rule list; continuing without it", "error", err, "path", rl.Path)
+				localRuleListErrs[strings.TrimSpace(rl.Path)] = err.Error()
 			}
 			continue
 		}
+		if isLocal {
+			// Success is reported as an empty error so that fixing a broken
+			// file and reloading clears the entry (the map is fully rebuilt).
+			localRuleListErrs[strings.TrimSpace(rl.Path)] = ""
+		}
 		ruleRecs = append(ruleRecs, rec)
+	}
+	if s.admin != nil {
+		s.admin.SetLocalRuleListErrors(localRuleListErrs)
 	}
 
 	var redactor redact.Redactor
@@ -1455,6 +1523,36 @@ func (s *Server) applyConfig(c config.Config) {
 		websocketRedactionBeta: c.Proxy.WebSocketRedactionBeta,
 		invalidJSONPolicy:      invalidJSONPolicy,
 	})
+
+	// Wire the admin dry-run tester to the freshly built redactor. The closure
+	// snapshots the server and reads the current runtime on each call, so it
+	// always tests against the latest rules; wiring it here (instead of only in
+	// ReloadFromConfig) also makes it available right after startup.
+	if s.admin != nil {
+		s.admin.SetRedactTester(func(text string) (string, []admin.TestHit) {
+			rt := s.runtimeSnapshot()
+			if rt.redactEng == nil {
+				return text, nil
+			}
+			out, matches := rt.redactEng.RedactWithMatches([]byte(text))
+			hits := make([]admin.TestHit, 0, len(matches))
+			for _, m := range matches {
+				if len(hits) >= 50 {
+					break
+				}
+				hits = append(hits, admin.TestHit{
+					Category:    m.Category,
+					Source:      m.Source,
+					Placeholder: m.Placeholder,
+					// The tester is manually triggered; previews are always
+					// masked (first2…last2) regardless of the redact_log setting.
+					Preview: previewValue(m.Original, 2, 2),
+					Length:  utf8.RuneCountInString(m.Original),
+				})
+			}
+			return string(out), hits
+		})
+	}
 }
 
 // ReloadFromConfig reloads configuration without restarting the proxy (mainly for rules/targets changes).
@@ -1479,6 +1577,7 @@ func (s *Server) ReloadFromConfig() {
 		"ner_enabled", c.Patterns.NER.Enabled,
 		"exclude", len(c.Patterns.Exclude),
 	)
+	s.warnNonLoopbackListen()
 }
 
 // appendAuditNote appends a note tag to an audit note field, keeping existing entries.
