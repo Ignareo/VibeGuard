@@ -44,12 +44,17 @@ type SubscriptionMeta struct {
 	// VerifiedSHA256 is a legacy field name (easy to confuse with "verified"); kept for backward compatibility with older meta files.
 	// New code should prefer ContentSHA256.
 	VerifiedSHA256 string `json:"verified_sha256,omitempty"`
-	// PinnedSHA256 is the trust-on-first-use pin recorded when sha256_pin: tofu is configured.
-	// Once set, subscription updates whose content hash differs are rejected.
+	// PinnedSHA256 is the trust-on-first-use pin, recorded on the first accepted fetch
+	// when sha256_pin is empty (the default) or "tofu". Once set, subscription updates
+	// whose content hash differs are rejected. An explicit fixed sha256_pin takes
+	// precedence and does not use this field.
 	PinnedSHA256 string `json:"pinned_sha256,omitempty"`
 
 	Bytes     int    `json:"bytes,omitempty"`
 	LastError string `json:"last_error,omitempty"`
+	// ConsecutiveFailures counts consecutive failed sync attempts (fetch/validate/apply);
+	// reset to 0 on the first successful sync. Surfaced to the admin UI for alerting.
+	ConsecutiveFailures int `json:"consecutive_failures,omitempty"`
 }
 
 func SubscriptionsDir() string {
@@ -264,6 +269,20 @@ func SyncSubscriptionIfDue(ctx context.Context, rl config.RuleListConfig, opts S
 		}
 	}
 
+	// A sync is attempted from here on: persist the meta exactly once per attempt.
+	// The deferred save keeps ConsecutiveFailures and LastError consistent on every
+	// outcome; sync failures never fail closed (the proxy stays usable).
+	defer func() {
+		if err != nil {
+			meta.ConsecutiveFailures++
+		} else {
+			meta.ConsecutiveFailures = 0
+		}
+		if saveErr := SaveSubscriptionMeta(metaPath, meta); saveErr != nil {
+			slog.Warn("订阅元数据写入失败", "path", metaPath, "error", saveErr)
+		}
+	}()
+
 	client := opts.Client
 	if client == nil {
 		client = &http.Client{Timeout: defaultSubscriptionTimeout}
@@ -293,7 +312,6 @@ func SyncSubscriptionIfDue(ctx context.Context, rl config.RuleListConfig, opts S
 	if err := validateRemoteURL(meta.URL, rl.AllowHTTP); err != nil {
 		meta.CheckedAt = now.Unix()
 		meta.LastError = err.Error()
-		_ = SaveSubscriptionMeta(metaPath, meta)
 		return false, meta, err
 	}
 
@@ -326,7 +344,6 @@ func SyncSubscriptionIfDue(ctx context.Context, rl config.RuleListConfig, opts S
 	if err != nil {
 		meta.CheckedAt = now.Unix()
 		meta.LastError = err.Error()
-		_ = SaveSubscriptionMeta(metaPath, meta)
 		return false, meta, err
 	}
 
@@ -334,7 +351,6 @@ func SyncSubscriptionIfDue(ctx context.Context, rl config.RuleListConfig, opts S
 	if err != nil {
 		meta.CheckedAt = now.Unix()
 		meta.LastError = err.Error()
-		_ = SaveSubscriptionMeta(metaPath, meta)
 		return false, meta, err
 	}
 	meta.CheckedAt = now.Unix()
@@ -346,37 +362,31 @@ func SyncSubscriptionIfDue(ctx context.Context, rl config.RuleListConfig, opts S
 			req2, reqErr := makeReq(false)
 			if reqErr != nil {
 				meta.LastError = reqErr.Error()
-				_ = SaveSubscriptionMeta(metaPath, meta)
 				return false, meta, reqErr
 			}
 			resp2, err2 := client.Do(req2)
 			if err2 != nil {
 				meta.LastError = err2.Error()
-				_ = SaveSubscriptionMeta(metaPath, meta)
 				return false, meta, err2
 			}
 			resp = resp2
 		} else {
-			// Cache exists: a 304 means the content equals what we last accepted, but a
-			// newly configured/reset pin must still be validated against the cached bytes.
-			if strings.TrimSpace(rl.SHA256Pin) != "" {
-				cached, readErr := os.ReadFile(rulesPath)
-				if readErr != nil {
-					meta.LastError = readErr.Error()
-					_ = SaveSubscriptionMeta(metaPath, meta)
-					return false, meta, readErr
-				}
-				sum := sha256.Sum256(cached)
-				if err := checkSubscriptionPin(rl.SHA256Pin, hex.EncodeToString(sum[:]), meta.PinnedSHA256, &meta); err != nil {
-					slog.Warn("订阅缓存内容未通过钉扎校验（304）", "url", meta.URL, "error", err)
-					meta.LastError = err.Error()
-					_ = SaveSubscriptionMeta(metaPath, meta)
-					return false, meta, err
-				}
+			// Cache exists: a 304 means the content equals what we last accepted, but the
+			// cached bytes must still be validated against the pin (fixed pin, or the TOFU
+			// pin that pin-less subscriptions default to — recorded here on first use).
+			cached, readErr := os.ReadFile(rulesPath)
+			if readErr != nil {
+				meta.LastError = readErr.Error()
+				return false, meta, readErr
+			}
+			sum := sha256.Sum256(cached)
+			if err := checkSubscriptionPin(rl.SHA256Pin, hex.EncodeToString(sum[:]), meta.PinnedSHA256, &meta); err != nil {
+				slog.Warn("订阅缓存内容未通过钉扎校验（304）", "url", meta.URL, "error", err)
+				meta.LastError = err.Error()
+				return false, meta, err
 			}
 			// Cache exists: just update check time; keep existing fingerprint.
 			meta.LastError = ""
-			_ = SaveSubscriptionMeta(metaPath, meta)
 			return false, meta, nil
 		}
 	}
@@ -385,7 +395,6 @@ func SyncSubscriptionIfDue(ctx context.Context, rl config.RuleListConfig, opts S
 	if resp.StatusCode != http.StatusOK {
 		err := fmt.Errorf("订阅拉取失败：HTTP %d", resp.StatusCode)
 		meta.LastError = err.Error()
-		_ = SaveSubscriptionMeta(metaPath, meta)
 		return false, meta, err
 	}
 
@@ -395,7 +404,6 @@ func SyncSubscriptionIfDue(ctx context.Context, rl config.RuleListConfig, opts S
 	body, err := readAllLimited(resp.Body, maxBytes)
 	if err != nil {
 		meta.LastError = err.Error()
-		_ = SaveSubscriptionMeta(metaPath, meta)
 		return false, meta, err
 	}
 
@@ -409,7 +417,6 @@ func SyncSubscriptionIfDue(ctx context.Context, rl config.RuleListConfig, opts S
 		Priority: rl.Priority,
 	}); err != nil {
 		meta.LastError = err.Error()
-		_ = SaveSubscriptionMeta(metaPath, meta)
 		return false, meta, err
 	}
 
@@ -420,7 +427,6 @@ func SyncSubscriptionIfDue(ctx context.Context, rl config.RuleListConfig, opts S
 		slog.Warn("订阅内容校验失败，已拒绝更新", "url", meta.URL, "error", err)
 		meta.CheckedAt = now.Unix()
 		meta.LastError = err.Error()
-		_ = SaveSubscriptionMeta(metaPath, meta)
 		return false, meta, err
 	}
 
@@ -437,35 +443,37 @@ func SyncSubscriptionIfDue(ctx context.Context, rl config.RuleListConfig, opts S
 	if prevOK && strings.TrimSpace(prev.ContentSHA256) != "" && strings.EqualFold(prev.ContentSHA256, sumHex) {
 		meta.UpdatedAt = prev.UpdatedAt
 		meta.LastError = ""
-		_ = SaveSubscriptionMeta(metaPath, meta)
 		return false, meta, nil
 	}
 
 	if err := writeFile0600(rulesPath, bytes.NewReader(body)); err != nil {
 		meta.LastError = err.Error()
-		_ = SaveSubscriptionMeta(metaPath, meta)
 		return false, meta, err
 	}
 
 	meta.UpdatedAt = now.Unix()
 	meta.LastError = ""
-	_ = SaveSubscriptionMeta(metaPath, meta)
 	return true, meta, nil
 }
 
 // checkSubscriptionPin enforces the sha256_pin integrity setting before new content
 // may overwrite the local cache. pin comes from config; prevPinned is the TOFU pin
-// recorded in the subscription meta. On TOFU first use, meta.PinnedSHA256 is set.
+// recorded in the subscription meta. An empty pin defaults to trust-on-first-use so
+// every subscription gets content-integrity protection out of the box (the pin is
+// shared with explicit "tofu" so toggling the setting cannot downgrade protection);
+// an explicit fixed pin takes precedence over TOFU. On TOFU first use,
+// meta.PinnedSHA256 is set.
 func checkSubscriptionPin(pin, sumHex, prevPinned string, meta *SubscriptionMeta) error {
 	pin = strings.ToLower(strings.TrimSpace(pin))
-	if pin == "" {
-		return nil
-	}
-	if pin == "tofu" {
+	if pin == "" || pin == "tofu" {
+		explicit := pin == "tofu"
 		pinned := strings.ToLower(strings.TrimSpace(prevPinned))
 		if pinned == "" {
-			// Trust on first use: pin to the first accepted content.
+			// Trust on first use: pin to the first accepted content. Older meta files
+			// without a recorded pin take this path once and are protected from then on.
 			meta.PinnedSHA256 = sumHex
+			slog.Info("订阅已启用 TOFU 钉扎：已记录首次接受内容的 sha256，后续内容哈希变化将被拒绝；如确认上游合法变更，请将 sha256_pin 设置为该哈希或删除订阅缓存以重新钉扎",
+				"url", strings.TrimSpace(meta.URL), "sha256", shortHash(sumHex), "explicit_tofu", explicit)
 			return nil
 		}
 		if !hashEqualHexConstantTime(pinned, sumHex) {

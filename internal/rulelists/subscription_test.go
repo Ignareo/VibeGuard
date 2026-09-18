@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -124,7 +125,7 @@ func TestSubscriptionTOFUPin(t *testing.T) {
 	}
 }
 
-func TestSubscriptionNoPinStillWorks(t *testing.T) {
+func TestSubscriptionEmptyPinDefaultsToTOFU(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 
 	body := testRulesV1
@@ -137,12 +138,158 @@ func TestSubscriptionNoPinStillWorks(t *testing.T) {
 		AllowHTTP: true,
 		Enabled:   true,
 	}
-	if updated, _, err := syncOnce(t, rl); err != nil || !updated {
-		t.Fatalf("unpinned subscription should update: updated=%v err=%v", updated, err)
+
+	// First fetch: accepted, and the content hash is recorded as a TOFU pin
+	// (an empty sha256_pin defaults to trust-on-first-use).
+	updated, meta, err := syncOnce(t, rl)
+	if err != nil || !updated {
+		t.Fatalf("first fetch should be accepted: updated=%v err=%v", updated, err)
 	}
+	if meta.PinnedSHA256 != sha256Hex(testRulesV1) {
+		t.Fatalf("empty pin should record a TOFU pin, got %q", meta.PinnedSHA256)
+	}
+	if meta.ConsecutiveFailures != 0 {
+		t.Fatalf("failures should be 0 after success, got %d", meta.ConsecutiveFailures)
+	}
+
+	// Content change: rejected like a pin mismatch; cache keeps the pinned content.
 	body = testRulesV2
-	if updated, _, err := syncOnce(t, rl); err != nil || !updated {
-		t.Fatalf("unpinned subscription should follow content changes: updated=%v err=%v", updated, err)
+	updated, meta, err = syncOnce(t, rl)
+	if err == nil || updated {
+		t.Fatalf("changed content under default TOFU should be rejected: updated=%v err=%v", updated, err)
+	}
+	if !strings.Contains(err.Error(), "TOFU") {
+		t.Fatalf("expected TOFU mismatch error, got: %v", err)
+	}
+	if meta.ConsecutiveFailures != 1 {
+		t.Fatalf("failures should be 1 after a rejected update, got %d", meta.ConsecutiveFailures)
+	}
+	rulesPath, _ := SubscriptionRulesPath(rl)
+	cached, err := os.ReadFile(rulesPath)
+	if err != nil || string(cached) != testRulesV1 {
+		t.Fatalf("cache must keep the pinned content, got %q err=%v", cached, err)
+	}
+
+	// The failure counter is persisted in the meta file (consumed by the admin UI).
+	metaPath, _ := SubscriptionMetaPath(rl)
+	persisted, ok, err := LoadSubscriptionMeta(metaPath)
+	if err != nil || !ok {
+		t.Fatalf("meta should be persisted: ok=%v err=%v", ok, err)
+	}
+	if persisted.ConsecutiveFailures != 1 {
+		t.Fatalf("persisted failures should be 1, got %d", persisted.ConsecutiveFailures)
+	}
+
+	// Restoring the pinned content succeeds (no rewrite) and resets the counter.
+	body = testRulesV1
+	updated, meta, err = syncOnce(t, rl)
+	if err != nil || updated {
+		t.Fatalf("restored content should be accepted without rewrite: updated=%v err=%v", updated, err)
+	}
+	if meta.ConsecutiveFailures != 0 {
+		t.Fatalf("failures should be reset on success, got %d", meta.ConsecutiveFailures)
+	}
+}
+
+func TestSubscriptionOldMetaWithoutPinAdoptsTOFU(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("If-None-Match") == `"v1"` {
+			w.WriteHeader(http.StatusNotModified)
+			return
+		}
+		w.Header().Set("ETag", `"v1"`)
+		fmt.Fprint(w, testRulesV1)
+	}))
+	defer srv.Close()
+
+	rl := config.RuleListConfig{
+		ID:        "oldmeta-test",
+		URL:       srv.URL,
+		AllowHTTP: true,
+		Enabled:   true,
+	}
+
+	// Simulate a meta file written by an older version: fingerprint and ETag exist,
+	// but no TOFU pin and no failure counter. The cache holds the accepted content.
+	rulesPath, _ := SubscriptionRulesPath(rl)
+	if err := writeFile0600(rulesPath, strings.NewReader(testRulesV1)); err != nil {
+		t.Fatalf("write cache: %v", err)
+	}
+	metaPath, _ := SubscriptionMetaPath(rl)
+	if err := os.MkdirAll(filepath.Dir(metaPath), 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	oldMeta := fmt.Sprintf(`{"url":%q,"etag":"\"v1\"","content_sha256":%q,"checked_at":100}`, srv.URL, sha256Hex(testRulesV1))
+	if err := os.WriteFile(metaPath, []byte(oldMeta), 0o600); err != nil {
+		t.Fatalf("write meta: %v", err)
+	}
+
+	// 304 path: the cached bytes are validated; the missing TOFU pin is recorded on
+	// first use instead of failing, so upgrades from older versions are seamless.
+	_, meta, err := syncOnce(t, rl)
+	if err != nil {
+		t.Fatalf("old meta without pin must adopt TOFU without error: %v", err)
+	}
+	if meta.PinnedSHA256 != sha256Hex(testRulesV1) {
+		t.Fatalf("TOFU pin should be recorded from cached content, got %q", meta.PinnedSHA256)
+	}
+	if meta.ConsecutiveFailures != 0 {
+		t.Fatalf("failures should stay 0 on success, got %d", meta.ConsecutiveFailures)
+	}
+}
+
+func TestSubscriptionConsecutiveFailures(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
+	body := testRulesV1
+	srv := newRuleServer(t, &body)
+	defer srv.Close()
+
+	rl := config.RuleListConfig{
+		ID:        "failcount-test",
+		URL:       srv.URL,
+		AllowHTTP: true,
+		Enabled:   true,
+		SHA256Pin: sha256Hex(testRulesV1),
+	}
+
+	// Success keeps the counter at 0.
+	if _, meta, err := syncOnce(t, rl); err != nil || meta.ConsecutiveFailures != 0 {
+		t.Fatalf("success should keep failures at 0: meta=%+v err=%v", meta, err)
+	}
+
+	// Consecutive rejected updates (fixed-pin mismatch) bump the counter.
+	body = testRulesV2
+	for want := 1; want <= 2; want++ {
+		_, meta, err := syncOnce(t, rl)
+		if err == nil {
+			t.Fatalf("tampered content should be rejected (attempt %d)", want)
+		}
+		if meta.ConsecutiveFailures != want {
+			t.Fatalf("failures should be %d, got %d", want, meta.ConsecutiveFailures)
+		}
+	}
+	metaPath, _ := SubscriptionMetaPath(rl)
+	persisted, ok, err := LoadSubscriptionMeta(metaPath)
+	if err != nil || !ok {
+		t.Fatalf("meta should be persisted: ok=%v err=%v", ok, err)
+	}
+	if persisted.ConsecutiveFailures != 2 {
+		t.Fatalf("persisted failures should be 2, got %d", persisted.ConsecutiveFailures)
+	}
+
+	// A successful sync resets the counter.
+	body = testRulesV1
+	if _, meta, err := syncOnce(t, rl); err != nil || meta.ConsecutiveFailures != 0 {
+		t.Fatalf("success should reset failures to 0: meta=%+v err=%v", meta, err)
+	}
+
+	// A transport failure (not only pin mismatches) also increments the counter.
+	srv.Close()
+	if _, meta, err := syncOnce(t, rl); err == nil || meta.ConsecutiveFailures != 1 {
+		t.Fatalf("transport failure should increment failures to 1: meta=%+v err=%v", meta, err)
 	}
 }
 
