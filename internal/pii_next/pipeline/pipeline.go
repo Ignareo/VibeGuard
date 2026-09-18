@@ -163,6 +163,7 @@ func (p *Pipeline) RedactWithMatches(input []byte) ([]byte, []redact.Match) {
 			End:         m.End,
 			Original:    original,
 			Category:    m.Category,
+			Source:      m.Source,
 			Placeholder: placeholder,
 		})
 

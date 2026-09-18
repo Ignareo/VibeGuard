@@ -16,6 +16,10 @@ type Match struct {
 	End      int
 	Original string
 	Category string
+	// Source is a human-readable identifier of the rule that produced the hit
+	// (rule-list name / keywords / ner / regex), for audit display. It must never
+	// contain the matched sensitive content itself.
+	Source string
 	// Placeholder is the generated placeholder (e.g. "__VG_EMAIL_...").
 	// It is only generated during replacement; used for audit/inspection displays that need to show redaction hits.
 	Placeholder string
@@ -121,6 +125,7 @@ func (e *Engine) RedactWithMatches(input []byte) ([]byte, []Match) {
 				End:      globalEnd,
 				Original: orig,
 				Category: cat,
+				Source:   "keywords",
 			})
 			return true
 		})
@@ -160,6 +165,7 @@ func (e *Engine) RedactWithMatches(input []byte) ([]byte, []Match) {
 						End:      globalEnd,
 						Original: original,
 						Category: e.regexCats[i],
+						Source:   "regex",
 					})
 				}
 			}
@@ -254,6 +260,7 @@ func (e *Engine) RedactWithMatches(input []byte) ([]byte, []Match) {
 				End:      seg.end,
 				Original: string(input[seg.start:seg.end]),
 				Category: m.Category,
+				Source:   m.Source,
 			})
 			covered = insertCovered(covered, seg)
 		}
