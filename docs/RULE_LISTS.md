@@ -27,6 +27,24 @@ regex   <类别> <RE2正则> [:: <校验器>]
 
 完整示例见 [rule_lists.sample.vgrules](rule_lists.sample.vgrules)。
 
+## 本地规则文件
+
+除订阅外，也可以直接引用本地 `.vgrules` 文件：
+
+- 推荐把文件放在 `~/.vibeguard/rules/local/`；管理页 `#/rule_lists` 上传的文件也落盘到该目录。
+- 在 `config.yaml` 中用 `path` 条目引用（init 模板已含此示例）：
+
+```yaml
+patterns:
+  rule_lists:
+    - name: my-local
+      path: ~/.vibeguard/rules/local/my.vgrules
+      enabled: true
+```
+
+- 保存文件即自动热重载，无需重启代理（`secret_files` 同理）。
+- 语法错误不影响其它规则：解析失败的整个列表被跳过（该列表规则不生效），管理页该列表显示红色错误详情，日志同时有 Warn；修复并保存文件后热重载自动恢复。
+
 ## 订阅
 
 订阅只需一个 URL。VibeGuard 会做基本安全检查（大小限制、文本解析、正则编译）并把拉取内容缓存到本地：
@@ -36,21 +54,21 @@ regex   <类别> <RE2正则> [:: <校验器>]
 
 ### 订阅完整性（sha256_pin）
 
-HTTPS + 解析校验挡不住"规则源本身被攻陷后推送恶意规则"。给 `rule_lists` 条目加 `sha256_pin` 可钉扎内容哈希：
+HTTPS + 解析校验挡不住"规则源本身被攻陷后推送恶意规则"。`sha256_pin` 用于钉扎内容哈希。**自 2026-09 批次起，留空（默认）即启用 TOFU 钉扎**，不再 fail-open：
 
 ```yaml
 patterns:
   rule_lists:
     - name: my-rules
       url: https://example.com/rules.vgrules
-      sha256_pin: tofu        # 或期望内容的 64 位 hex sha256
+      sha256_pin: tofu        # 留空等价于 tofu；或填期望内容的 64 位 hex sha256
       enabled: true
 ```
 
-- `tofu` —— 首次信任：首个被接受的内容哈希记入订阅元数据（`pinned_sha256`），之后哈希不符的更新被拒绝。
+- 留空（默认）或 `tofu` —— 首次信任：首个被接受的内容哈希记入订阅元数据（`pinned_sha256`），之后哈希不符的更新被拒绝（固定 64 位 hex pin 优先级最高，不受 TOFU 影响）。
 - 64 位 hex —— 内容 sha256 必须完全一致。
 
-被拒绝的更新会保留现有本地缓存、在订阅元数据里写 `last_error`（管理页可见）并打告警日志。若上游是正常更新，把 pin 改成新哈希，或删掉订阅元数据文件里的 `pinned_sha256`。
+被拒绝的更新会保留现有本地缓存、在订阅元数据里写 `last_error`（管理页可见）并打告警日志；元数据里的 `consecutive_failures` 记录连续同步失败次数（成功即清零），管理页在连续失败 ≥2 次时显示红色显著告警。若上游是正常更新，把 pin 改成新哈希，或删掉订阅元数据文件里的 `pinned_sha256`。
 
 ## 公开规则列表
 

@@ -75,6 +75,10 @@ open http://127.0.0.1:28657/manager/
 | `vibeguard init` | 交互式初始化配置与 CA（用安装脚本则无需执行） |
 | `vibeguard trust --mode system\|user\|auto` | 把 CA 安装到系统/用户信任库（可能需 sudo） |
 | `vibeguard test [pattern] [text]` | 测试脱敏效果（pattern 按关键词精确匹配处理） |
+| `vibeguard test --text "..."` | 按真实配置干跑一段文本：输出每个命中的分类、来源规则、占位符与掩码预览（不写会话、不联网拉取订阅） |
+| `vibeguard rules list` | 列出关键词及分类 |
+| `vibeguard rules add <词> [--category <分类>]` | 添加关键词（去重、落盘加密，运行中的代理自动热加载） |
+| `vibeguard rules remove <词>` | 删除关键词 |
 | `vibeguard version` | 版本信息 |
 | `vibeguard completion bash\|zsh\|fish\|powershell` | 生成 shell 补全 |
 
@@ -98,7 +102,7 @@ patterns:
 
 | 字段 | 默认 | 说明 |
 |---|---|---|
-| `proxy.listen` | `127.0.0.1:28657` | 监听地址。**不要**改成 `0.0.0.0`——会把管理面板暴露给局域网且无 CSRF 防护 |
+| `proxy.listen` | `127.0.0.1:28657` | 监听地址。**不要**改成 `0.0.0.0`——会把管理面板暴露给局域网（此时启动会 Warn、管理页显示红色横幅） |
 | `proxy.intercept_mode` | `global` | `global` 拦截全部 HTTPS；`targets` 只拦截 `proxy.targets` 里的域名 |
 | `proxy.invalid_json_policy` | `partial` | 脱敏导致 JSON 非法时的策略：`partial`（按命中粒度跳过）/ `allow`（放行原文）/ `block`（拒绝请求） |
 | `proxy.websocket_redaction_beta` | `false` | WebSocket 脱敏（beta，主要面向 Codex） |
@@ -111,20 +115,37 @@ patterns:
 
 管理页入口：规则列表 `#/rule_lists`，关键词 `#/keywords`，NER `#/ner`。语法与订阅钉扎详见 [docs/RULE_LISTS.md](docs/RULE_LISTS.md)。
 
+### 快速添加敏感词
+
+三条路径任选，**运行中的代理会自动热加载，无需重启**（本地 `.vgrules` 文件与 `secret_files` 保存后同样自动热重载）：
+
+1. **CLI（推荐给命令行用户）**——关键词去重后落盘加密保存（机制同 `~/.vibeguard/config.yaml` 中的关键词）：
+
+   ```bash
+   vibeguard rules add "内部项目代号" --category PROJECT
+   vibeguard rules list                      # 查看现有关键词及分类
+   vibeguard rules remove "内部项目代号"
+   ```
+
+2. **管理页**——打开 `#/keywords` 添加关键词，即时生效。
+
+3. **`.vgrules` 规则文件**（适合批量导入 / 正则 / 校验位验证器）——编辑 `~/.vibeguard/rules/local/my.vgrules`（init 模板已含 `path` 引用示例），保存即热重载；也可在 `#/rule_lists` 上传文件。语法见 [docs/RULE_LISTS.md](docs/RULE_LISTS.md)。
+
 NER 需自备 [Presidio Analyzer](https://microsoft.github.io/presidio/) 部署并配置 `patterns.ner.presidio_url`；中文识别需显式设置 `patterns.ner.language: "zh"` 且 Presidio 端装有中文模型（如 `zh_core_web_sm` + `jieba`），详见 [docs/TECHNICAL.md](docs/TECHNICAL.md#ner)。
 
 ## 如何确认生效
 
 1. `vibeguard start` 启动代理；
 2. 经 VibeGuard 启动助手（`vibeguard kimi/claude/...`），或给 IDE/应用设置代理 `http://127.0.0.1:28657`；
-3. 在对话中发一条包含测试敏感词的消息（如 `vibeguard test` 先本地验证规则）；
-4. 打开 `/manager/` 的 **Audit** 面板：每条请求显示是否进入扫描、命中次数与命中预览（`ab…yz` 形式，不含完整原文）。
+3. 先用 `vibeguard test --text "包含敏感词的句子"` 本地干跑验证规则命中（分类/来源/占位符），再发真实对话；
+4. 打开 `/manager/` 的 **Audit** 面板：每条请求显示是否进入扫描、命中次数、命中预览（`ab…yz` 形式，不含完整原文）与来源规则。规则列表页还有"脱敏试跑"小工具，管理页内即可验证规则。
 
 ## 管理端安全
 
-- 首次访问 `http://127.0.0.1:28657/manager/` 会要求设置管理密码。
+- 首次访问 `http://127.0.0.1:28657/manager/` 会要求设置管理密码（仅接受本机 loopback 直连设置）。
 - 密码以 bcrypt 哈希保存于 `~/.vibeguard/admin_auth.json`（权限 `0600`）。
 - 登录连续失败会触发指数退避锁定；管理操作（改配置/规则等）会写入元审计。
+- 管理 API 写操作要求自定义头 `X-VG-Admin-Request` 并校验 `Origin`/`Sec-Fetch-Site`（CSRF 防护）；代理只会把**直连**请求路由到管理端，经代理转发的请求即使路径撞上 `/manager/` 也不会到达管理 API。
 - 忘记密码：`vibeguard stop` 后删除 `~/.vibeguard/admin_auth.json`，刷新 `/manager/` 重新设置。
 
 ## 卸载
@@ -151,7 +172,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command "& ([ScriptBlock]::Create
 - **代理模式（透明脱敏 + 自动还原）**：`vibeguard kimi [args...]`；默认拦截目标已包含 `api.kimi.com`、`api.moonshot.cn`、`api.moonshot.ai`。
 - **预检插件**：`integrations/kimi-code-vibeguard/` —— Kimi Code 插件（`vibeguard-precheck`），在敏感内容发给模型前**拦截**包含密钥的用户输入和 `Bash` 命令。Kimi Code 的插件/Hook API 无法改写出站消息，因此该插件是代理模式的补充而非替代，详见其 README。
 
-对 OpenCode 也可以选择进程内插件 [opencode-vibeguard](https://github.com/inkdust2021/opencode-vibeguard)，完全不需要代理。
+对 OpenCode 也可以选择进程内插件 [opencode-vibeguard](https://github.com/inkdust2021/opencode-vibeguard)，完全不需要代理。默认拦截目标（`intercept_mode: targets`）已包含 `opencode.ai`。
 
 ## 截图
 

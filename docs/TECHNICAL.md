@@ -257,14 +257,16 @@ textStreamRestorer.Feed:
 
 ### 审计与安全
 
-- **默认不落明文**：审计事件只记录命中类别、次数和 `previewValue`（前 2 位…后 2 位）；`audit_db.persist_raw_values: true` 才会持久化原文（默认 false）。审计文件权限 `0600`。
+- **默认不落明文**：审计事件只记录命中类别、次数、来源规则（`source`，如 `rulelist:<列表名>` / `keywords` / `ner-presidio`）和 `previewValue`（前 2 位…后 2 位）；`audit_db.persist_raw_values: true` 才会持久化原文（默认 false）。审计文件权限 `0600`。
 - **元审计**：管理端操作（改配置/规则/关键词等）记录操作者、动作、时间。
 - **登录防爆破**：`/manager/` 登录连续失败指数退避锁定。
-- **网络暴露面**：`proxy.listen` 默认 `127.0.0.1`；改成 `0.0.0.0` 会把管理面板暴露给局域网（且无 CSRF token），不建议。
+- **CSRF 防护**：管理 API 写操作（非 GET/HEAD/OPTIONS）必须带自定义头 `X-VG-Admin-Request: 1`，并校验 `Origin` / `Sec-Fetch-Site`；`/manager/api/auth/setup` 仅接受 loopback 直连（origin-form + loopback RemoteAddr）。SameSite=Strict cookie 不防同站跨端口，这层是主力防线。
+- **路由分流**：只有 origin-form 直连请求（`r.URL.Host == ""`）且路径以 `/manager/` 开头才进管理端；absolute-URI 代理请求即使路径撞上 `/manager/` 也一律走代理转发。
+- **网络暴露面**：`proxy.listen` 默认 `127.0.0.1`；配置为非 loopback 时启动与热加载都会打 Warn 日志，管理页显示红色横幅提示。
 
 ### 规则订阅完整性
 
-远程 `.vgrules` 订阅默认走 HTTPS + 解析校验（大小限制、正则编译检查），并可加 `sha256_pin` 钉扎内容哈希（TOFU 或固定值），被篡改的更新会被拒绝并保留本地缓存。详见 [RULE_LISTS.md](RULE_LISTS.md)。本 fork 的默认订阅 URL 指向 fork 仓库（`Ignareo/VibeGuard`）。
+远程 `.vgrules` 订阅默认走 HTTPS + 解析校验（大小限制、正则编译检查）。**`sha256_pin` 留空（默认）即 TOFU 钉扎**：首个被接受内容的 sha256 记入订阅元数据 `pinned_sha256`，之后哈希不符的更新被拒绝并保留本地缓存；显式固定 64 位 hex pin 优先级最高。订阅元数据同时维护 `last_error`（管理页可见）与 `consecutive_failures`（连续同步失败计数，成功清零；≥2 次时管理页红色显著告警）。本地 `.vgrules` 文件的加载错误（文件缺失/解析失败）由 proxy 在每次重载时通过 `SetLocalRuleListErrors` 上送，管理页对应列表标红。详见 [RULE_LISTS.md](RULE_LISTS.md)。本 fork 的默认订阅 URL 指向 fork 仓库（`Ignareo/VibeGuard`）。
 
 ### NER
 
@@ -305,6 +307,7 @@ RUN pip install --no-cache-dir jieba && \
 | `session.wal_compact_bytes` | 内置阈值 | WAL 超过该大小自动压缩 |
 | `audit_db.file` / `retention` | 关 / - | SQLite 审计（需 `vibeguard_full` 构建 tag） |
 | `audit_db.persist_raw_values` | `false` | 持久化命中原文（**不建议开启**） |
+| `allow_project_sensitive_overrides` | `false` | 允许项目级 `.vibeguard.yaml` 覆盖安全敏感字段（`audit_db` / `proxy.listen` / `proxy.intercept_mode` / `rule_lists` 订阅 URL）；默认忽略并 Warn |
 | `log.level` / `log.redact_log` | `info` / `true` | 日志级别 / 日志脱敏 |
 
 新增配置字段的约定：默认值与合并逻辑在 `internal/config/config.go`，并同步 `cmd/vibeguard/main.go` 里 zh/en 两套 init 模板。

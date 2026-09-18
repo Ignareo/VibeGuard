@@ -31,7 +31,7 @@ Response path (restore): `proxy.go` `OnResponse` → `internal/stream` (SSE, per
 
 | Package | Role |
 |---|---|
-| `cmd/vibeguard` | CLI (cobra): start/stop/run/`<assistant>`/init/trust/test/version; zh + en init templates |
+| `cmd/vibeguard` | CLI (cobra): start/stop/run/`<assistant>`/init/trust/test/rules/version; `test --text` 干跑（加载真实配置，镜像 proxy 的识别器组装，临时 session 目录）；zh + en init templates |
 | `internal/proxy` | MITM core, CONNECT, intercept modes, audit emission, config hot reload |
 | `internal/promptredact` | Structured redaction of chat-API JSON bodies (no system-reminder exemption) |
 | `internal/pii_next` / `internal/redact` | Newer pipeline / legacy keyword engine; both normalize via textsafe and rebuild in a single pass |
@@ -39,10 +39,10 @@ Response path (restore): `proxy.go` `OnResponse` → `internal/stream` (SSE, per
 | `internal/ahocorasick` | Keyword matcher: pure substring on caller-normalized text; sorted-array transitions + root lookup table |
 | `internal/restore` / `internal/stream` | Placeholder restore: checksum-verified (`VerifyPlaceholderChecksum`), tail boundary in code (RE2 has no lookahead); `stream.MessageRestorer` for cross-message (WebSocket) restore |
 | `internal/session` | Mapping store, TTL+LRU, AES-GCM WAL with batched fsync (`wal_sync_interval`) and compaction (`wal_compact_bytes`); `GetOrCreatePlaceholder` is atomic under one lock |
-| `internal/rulelists` | `.vgrules` parsing (keyword/regex/`:: luhn\|china_id\|uscc` validators) + HTTPS subscriptions with `sha256_pin` (TOFU/fixed) |
+| `internal/rulelists` | `.vgrules` parsing (keyword/regex/`:: luhn\|china_id\|uscc` validators) + HTTPS subscriptions with `sha256_pin` (empty/`"tofu"` = trust-on-first-use, the default; fixed 64-hex pin wins); meta tracks `last_error` + `consecutive_failures` |
 | `internal/defaultrules` | Built-in `default.vgrules`; default subscription URL points at this fork (`Ignareo/VibeGuard`) |
 | `internal/secretsources` | Import secrets from dotenv/lines files as keywords |
-| `internal/admin` + `internal/auditdb` | Admin UI/API (bcrypt auth, login brute-force backoff, meta-audit of admin ops); in-memory + optional SQLite audit (build tag `vibeguard_full`); audit stores previews only unless `audit_db.persist_raw_values` |
+| `internal/admin` + `internal/auditdb` | Admin UI/API (bcrypt auth, login brute-force backoff, meta-audit of admin ops); in-memory + optional SQLite audit (build tag `vibeguard_full`); audit stores previews only unless `audit_db.persist_raw_values`; audit matches carry `source` (rule origin); write APIs require `X-VG-Admin-Request: 1` + Origin/Sec-Fetch-Site checks (CSRF); `/auth/setup` is loopback-direct-only; POST `/api/test` dry-run via `SetRedactTester` wired by proxy; non-loopback listen warning surfaces as admin banner; local rule-list load errors pushed by proxy via `SetLocalRuleListErrors` |
 | `internal/cert` | CA generation/trust; keyword at-rest encryption key derives from CA key |
 | `internal/wsproxy` | WebSocket redaction (beta): inflates permessage-deflate (RSV1) text frames and forwards uncompressed, frame protocol validation, `SetOnError` hook → audit note `ws_frame_parse_error` |
 | `integrations/kimi-code-vibeguard` | Kimi Code precheck plugin (Node hook script, no Go) |
@@ -53,6 +53,8 @@ Response path (restore): `proxy.go` `OnResponse` → `internal/stream` (SSE, per
 - Comments/docstrings in English in Go code; UI strings are bilingual via `uiText(lang, zh, en)` — update both languages.
 - Config: global `~/.vibeguard/config.yaml`, project override `.vibeguard.yaml`, hot-reloaded via fsnotify; new config fields need defaults in `internal/config/config.go` **and** both init templates in `cmd/vibeguard/main.go` (zh + en; the proxy/targets section uses literal tab indentation).
 - Never log or audit raw sensitive values on purpose; match previews use `previewValue` (first2…last2).
+- `redact.Match.Source` carries the human-readable rule origin (e.g. `rulelist:<name>`, `keywords`, `ner-presidio`, `regex`); it must never contain the matched sensitive content itself.
+- Project-level `.vibeguard.yaml` cannot override security-sensitive fields (`audit_db`, `proxy.listen`, `proxy.intercept_mode`, `rule_lists` URLs) unless global `allow_project_sensitive_overrides: true`; ignored overrides are logged at Warn.
 - Placeholder format: `__VG_<CAT>_<hash14>__` where the last 2 hex chars are a checksum; legacy 12-hex placeholders must keep restoring (old WAL mappings).
 - `textStreamRestorer.Feed` aliasing gotcha: `Restore` may return an alias of its input — copy before shifting the buffer tail.
 
