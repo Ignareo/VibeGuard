@@ -138,7 +138,7 @@ sha256_file() {
 
 install_vibeguard_from_release() {
   local install_dir="${1:-}"
-  local repo="${2:-inkdust2021/VibeGuard}"
+  local repo="${2:-Ignareo/VibeGuard}"
   local version="${3:-latest}"
   local verify="${4:-1}" # 1|0
   local variant="${5:-lite}" # lite|full
@@ -240,6 +240,54 @@ install_vibeguard_from_release() {
       install -m 0755 "${tmp}/vibeguard" "${install_dir}/vibeguard"
     else
       cp -f "${tmp}/vibeguard" "${install_dir}/vibeguard"
+      chmod 0755 "${install_dir}/vibeguard" >/dev/null 2>&1 || true
+    fi
+  )
+}
+
+install_vibeguard_from_source() {
+  local install_dir="${1:-}"
+  local repo="${2:-Ignareo/VibeGuard}"
+  local ref="${3:-main}"
+  local variant="${4:-lite}" # lite|full
+
+  [[ -n "${install_dir}" ]] || return 1
+  variant="$(to_lower "${variant}")"
+  ref="${ref:-main}"
+
+  (
+    set -euo pipefail
+    need go
+    need git
+
+    tmp="$(mktemp -d -t vibeguard-src.XXXXXX 2>/dev/null || mktemp -d "/tmp/vibeguard-src.XXXXXX")"
+    trap 'rm -rf "$tmp"' EXIT
+
+    say "从源码构建：${repo}@${ref}" "Building from source: ${repo}@${ref}"
+    echo "$(t "仓库：" "Repo: ")${repo}"
+    echo "$(t "引用：" "Ref: ")${ref}"
+    echo "$(t "变体：" "Variant: ")${variant}"
+
+    src="${tmp}/src"
+    if ! git clone --depth 1 --branch "${ref}" "https://github.com/${repo}.git" "${src}" >/dev/null 2>&1; then
+      # --branch does not accept arbitrary commit SHAs: fall back to a full clone + checkout.
+      rm -rf "${src}"
+      git clone "https://github.com/${repo}.git" "${src}" >/dev/null 2>&1
+      git -C "${src}" checkout -q "${ref}" >/dev/null 2>&1
+    fi
+
+    out="${tmp}/vibeguard"
+    if [[ "${variant}" == "full" ]]; then
+      (cd "${src}" && go build -tags vibeguard_full -o "${out}" ./cmd/vibeguard)
+    else
+      (cd "${src}" && go build -o "${out}" ./cmd/vibeguard)
+    fi
+
+    mkdir -p "${install_dir}"
+    if have install; then
+      install -m 0755 "${out}" "${install_dir}/vibeguard"
+    else
+      cp -f "${out}" "${install_dir}/vibeguard"
       chmod 0755 "${install_dir}/vibeguard" >/dev/null 2>&1 || true
     fi
   )
@@ -518,7 +566,10 @@ EOF
 docker_install() {
   need docker
 
-  local image="ghcr.io/inkdust2021/vibeguard:latest"
+  local repo="${VG_INSTALL_REPO:-Ignareo/VibeGuard}"
+  local owner="${repo%%/*}"
+  owner="$(to_lower "${owner}")"
+  local image="${VIBEGUARD_DOCKER_IMAGE:-ghcr.io/${owner}/vibeguard:latest}"
   local name="vibeguard"
   local volume="vibeguard-data"
   local host_port="${VIBEGUARD_DOCKER_PORT:-28657}"
@@ -532,8 +583,19 @@ docker_install() {
     die "Docker 未运行或不可用（请先启动 Docker Desktop / dockerd）" "Docker does not seem to be running (start Docker Desktop / dockerd first)"
   fi
 
-  say "拉取镜像：${image}" "Pulling image: ${image}"
-  docker pull "${image}" >/dev/null
+  if in_repo && [[ -f "./Dockerfile" ]]; then
+    # Running inside the source tree: build the image locally (the fork may not
+    # have published a ghcr.io image yet).
+    say "本地构建镜像：${image}" "Building image locally: ${image}"
+    if ! docker build -t "${image}" . >/dev/null; then
+      die "本地构建镜像失败：${image}" "Failed to build image locally: ${image}"
+    fi
+  else
+    say "拉取镜像：${image}" "Pulling image: ${image}"
+    if ! docker pull "${image}" >/dev/null; then
+      die "拉取镜像失败：${image}（镜像可能尚未发布；可改用 --method native，或在仓库内运行本脚本以本地构建）" "Failed to pull image: ${image} (image may not be published yet; use --method native, or run this script inside the repo to build locally)"
+    fi
+  fi
 
   docker volume create "${volume}" >/dev/null 2>&1 || true
 
@@ -1170,17 +1232,13 @@ mkdir -p "${INSTALL_DIR}"
 
 say "安装目录：${INSTALL_DIR}" "Install dir: ${INSTALL_DIR}"
 
-release_repo="${VG_INSTALL_REPO:-inkdust2021/VibeGuard}"
+release_repo="${VG_INSTALL_REPO:-Ignareo/VibeGuard}"
+release_ref="${VG_INSTALL_REF:-main}"
 if ! in_repo; then
   # Not in a source tree: prefer GitHub Release binaries (no Go required)
   if ! install_vibeguard_from_release "${INSTALL_DIR}" "${release_repo}" "${INSTALL_VERSION}" "${VERIFY_RELEASE}" "${INSTALL_VARIANT}"; then
-    say "Release 安装失败：将回退到 go install（需要 Go）" "Release install failed: falling back to go install (requires Go)"
-    need go
-    if [[ "${INSTALL_VARIANT}" == "full" ]]; then
-      GOBIN="${INSTALL_DIR}" go install -tags vibeguard_full github.com/inkdust2021/vibeguard/cmd/vibeguard@latest
-    else
-      GOBIN="${INSTALL_DIR}" go install github.com/inkdust2021/vibeguard/cmd/vibeguard@latest
-    fi
+    say "Release 安装失败：将从 ${release_repo} 源码构建（需要 Go 与 git）" "Release install failed: building from source of ${release_repo} (requires Go and git)"
+    install_vibeguard_from_source "${INSTALL_DIR}" "${release_repo}" "${release_ref}" "${INSTALL_VARIANT}" || die "源码构建失败" "Source build failed"
   fi
 else
   # In a source tree: build locally by default (better for dev/debug)

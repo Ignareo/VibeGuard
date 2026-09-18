@@ -19,7 +19,7 @@ VibeGuard 的 Kimi Code 配套插件。由于 Kimi Code 的插件/Hook API 目�
 /reload
 ```
 
-或直接从 GitHub 安装：`/plugins install https://github.com/<owner>/<repo>/tree/<ref>/integrations/kimi-code-vibeguard`
+或直接从 GitHub 安装：`/plugins install https://github.com/Ignareo/VibeGuard/tree/main/integrations/kimi-code-vibeguard`
 
 方式二（全局 hooks，免插件管理器）：在 `~/.kimi-code/config.toml` 末尾追加：
 

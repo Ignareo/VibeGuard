@@ -5,12 +5,12 @@ set -euo pipefail
 # Notes:
 # - This file is only a bootstrap; the real installer logic lives in install.sh.
 # - Override repo/ref via env vars (useful for forks or pinning versions):
-#   VG_INSTALL_REPO=owner/repo   (default: inkdust2021/VibeGuard)
+#   VG_INSTALL_REPO=owner/repo   (default: Ignareo/VibeGuard, this fork)
 #   VG_INSTALL_REF=ref          (default: main; can be v1.2.3 or a commit SHA)
 
 have() { command -v "$1" >/dev/null 2>&1; }
 
-VG_INSTALL_REPO="${VG_INSTALL_REPO:-inkdust2021/VibeGuard}"
+VG_INSTALL_REPO="${VG_INSTALL_REPO:-Ignareo/VibeGuard}"
 VG_INSTALL_REF="${VG_INSTALL_REF:-main}"
 VG_INSTALL_PATH="${VG_INSTALL_PATH:-install.sh}"
 

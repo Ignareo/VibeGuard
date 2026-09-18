@@ -212,7 +212,7 @@ function GetExpectedSha256([string]$ChecksumsFile, [string]$AssetName) {
 
 function InstallFromRelease([string]$InstallDir0, [string]$Variant0, [string]$Version0) {
   $repo = $env:VG_INSTALL_REPO
-  if ([string]::IsNullOrWhiteSpace($repo)) { $repo = "inkdust2021/VibeGuard" }
+  if ([string]::IsNullOrWhiteSpace($repo)) { $repo = "Ignareo/VibeGuard" }
 
   $goarch = DetectGoArch
   if (-not $goarch) {
@@ -397,17 +397,36 @@ if (InRepo) {
     InstallFromRelease "$InstallDir" "$ScriptVariant" "$Version"
     $installed = $true
   } catch {
-    Write-Warning (T ("Release 安装失败，将尝试 go install（" + $_.Exception.Message + "）") ("Release install failed; falling back to go install (" + $_.Exception.Message + ")"))
+    Write-Warning (T ("Release 安装失败，将改为从源码构建（" + $_.Exception.Message + "）") ("Release install failed; falling back to building from source (" + $_.Exception.Message + ")"))
   }
 
   if (-not $installed) {
     Need "go"
-    Say "未检测到源码：通过 go install 安装" "Repo not found: installing via go install"
-    $env:GOBIN = "$InstallDir"
-    $args = @("install")
-    if ($ScriptVariant -eq "full") { $args += @("-tags", "vibeguard_full") }
-    $args += @("github.com/inkdust2021/vibeguard/cmd/vibeguard@latest")
-    Run "go" $args
+    Need "git"
+    $repo = $env:VG_INSTALL_REPO
+    if ([string]::IsNullOrWhiteSpace($repo)) { $repo = "Ignareo/VibeGuard" }
+    $ref = $env:VG_INSTALL_REF
+    if ([string]::IsNullOrWhiteSpace($ref)) { $ref = "main" }
+    Say "未检测到源码：将从 $repo 克隆并构建" "Repo not found: cloning and building from $repo"
+    $tmp = Join-Path $env:TEMP ("vibeguard-" + [Guid]::NewGuid().ToString("N"))
+    New-Item -ItemType Directory -Force -Path "$tmp" | Out-Null
+    try {
+      $src = Join-Path "$tmp" "src"
+      Run "git" @("clone", "--depth", "1", "--branch", "$ref", "https://github.com/$repo.git", "$src")
+      $outExe = Join-Path "$tmp" "vibeguard.exe"
+      $args = @("build", "-o", "$outExe")
+      if ($ScriptVariant -eq "full") { $args += @("-tags", "vibeguard_full") }
+      $args += @("./cmd/vibeguard")
+      Push-Location "$src"
+      try {
+        Run "go" $args
+      } finally {
+        Pop-Location
+      }
+      Copy-Item -Force -LiteralPath "$outExe" -Destination (Join-Path "$InstallDir" "vibeguard.exe")
+    } finally {
+      Remove-Item -Recurse -Force -LiteralPath "$tmp" -ErrorAction SilentlyContinue | Out-Null
+    }
   }
 }
 

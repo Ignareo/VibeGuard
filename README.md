@@ -1,11 +1,13 @@
 <p align="center">
   <img src="./image/logo.jpg" alt="VibeGuard" width="720"><br><br>
   <span>仅仅 1% 内存占用，给你 99% 隐私保护。</span><br><br>
-  <a href="LICENSE"><img alt="License" src="https://img.shields.io/github/license/inkdust2021/VibeGuard"></a>
-  <a href="go.mod"><img alt="Go 版本" src="https://img.shields.io/github/go-mod/go-version/inkdust2021/VibeGuard"></a>
+  <a href="LICENSE"><img alt="License" src="https://img.shields.io/github/license/Ignareo/VibeGuard"></a>
+  <a href="go.mod"><img alt="Go 版本" src="https://img.shields.io/github/go-mod/go-version/Ignareo/VibeGuard"></a>
 </p>
 
-> **Fork 声明**：本仓库是 [inkdust2021/VibeGuard](https://github.com/inkdust2021/VibeGuard) 的个人 fork，基于 Apache-2.0 协议修改。新增 **Kimi Code 支持**（`vibeguard kimi` 代理模式与 `integrations/kimi-code-vibeguard` 预检插件）以及一批安全/性能强化（见 [PLAN.md](PLAN.md)）。与上游项目无关联；fork 特有的改动请勿向上游提交 issue。
+> **Fork 声明**：
+>
+> 本仓库是 [inkdust2021/VibeGuard](https://github.com/inkdust2021/VibeGuard) 的个人 fork（[Ignareo/VibeGuard](https://github.com/Ignareo/VibeGuard)），基于 Apache-2.0 协议修改。新增 **Kimi Code 支持**（`vibeguard kimi` 代理模式与 `integrations/kimi-code-vibeguard` 预检插件）以及一批安全/性能强化，详见下文 [「本 Fork 相对上游的改动」](#本-fork-相对上游的改动)（完整清单见 [PLAN.md](PLAN.md)）。与上游项目无关联；fork 特有的改动请勿向上游提交 issue。
 
 VibeGuard 是一个轻量化的本地 MITM HTTPS 代理：在你用 AI 编程助手（Claude Code / Codex / Kimi Code / OpenCode……）时，把发往大模型 API 的请求中的密钥、手机号、身份证等敏感信息替换为占位符（如 `__VG_EMAIL_9811f8394a1628__`），收到响应后再还原回来。模型看到的是占位符，你看到的是原文。
 
@@ -19,15 +21,30 @@ VibeGuard 是一个轻量化的本地 MITM HTTPS 代理：在你用 AI 编程助
 
 ## 安装
 
-```bash
-# macOS / Linux
-curl -fsSL https://vibeguard.top/install | bash
+本 fork 目前**未发布预编译 Release**，安装脚本会自动回退到源码构建（需要 Go 1.24+ 与 git；发布 Release 后会优先下载预编译二进制）。
 
-# Windows
-powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://vibeguard.top/install.ps1 | iex"
+```bash
+# macOS / Linux（一键脚本）
+curl -fsSL https://raw.githubusercontent.com/Ignareo/VibeGuard/main/install | bash
+
+# 或克隆后安装（推荐用于本地开发/调试）
+git clone https://github.com/Ignareo/VibeGuard.git
+cd VibeGuard && bash install.sh
 ```
 
-安装脚本会生成 CA 证书、写入默认配置并引导信任 CA。源码安装：`go install ./cmd/vibeguard` 后运行 `vibeguard init`。
+```powershell
+# Windows（PowerShell，一键脚本）
+powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://raw.githubusercontent.com/Ignareo/VibeGuard/main/install.ps1 | iex"
+
+# 或克隆后安装
+git clone https://github.com/Ignareo/VibeGuard.git
+cd VibeGuard
+powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1
+```
+
+安装脚本会生成 CA 证书、写入默认配置并引导信任 CA。手动源码安装：在仓库内执行 `go install ./cmd/vibeguard` 后运行 `vibeguard init`。Docker 部署：在仓库内执行 `bash install.sh --method docker`，或 `docker compose -f docker-compose.source.yml up -d`（均为本地构建镜像）；发布 Release 后也可直接 `docker compose up -d` 拉取 `ghcr.io/ignareo/vibeguard`。
+
+> 上游的一键安装（`https://vibeguard.top/install`）安装的是上游原版，不包含本 fork 的改动。
 
 ## 快速上手
 
@@ -61,6 +78,39 @@ open http://127.0.0.1:28657/manager/
 - **规则订阅防投毒**：订阅支持 `sha256_pin`（TOFU 或固定哈希）钉扎内容，被篡改的更新会被拒绝。
 - **两种拦截模式**：`proxy.intercept_mode: global`（全部 CONNECT 都 MITM）或 `targets`（只拦截列表内域名）。
 - **热更新**：管理页修改规则/目标域名无需重启即生效。
+
+## 本 Fork 相对上游的改动
+
+本仓库在 2026-09 做了一轮「Kimi Code 支持 + 安全/性能强化」。完整工作清单见 [PLAN.md](PLAN.md)，实现细节见 [docs/TECHNICAL.md](docs/TECHNICAL.md)。
+
+### Kimi Code 支持
+
+- **代理模式（透明脱敏 + 自动还原）**：`vibeguard kimi [args...]`；默认拦截目标新增 `api.kimi.com`、`api.moonshot.cn`、`api.moonshot.ai`（`opencode.ai` 也在默认列表）。
+- **预检插件**：`integrations/kimi-code-vibeguard/` —— Kimi Code 插件（`vibeguard-precheck`），在敏感内容发给模型前**拦截**包含密钥的用户输入和 `Bash` 命令。Kimi Code 的插件/Hook API 无法改写出站消息，因此该插件是代理模式的补充而非替代，详见其 README。
+- **默认规则订阅**改指向本 fork 的 `internal/defaultrules/default.vgrules`；旧的上游默认订阅 URL 会在加载时自动迁移。
+
+### 安全强化
+
+- **防绕过归一化**：匹配前剔除零宽字符、NFKC 折叠、大小写折叠，并把命中区间映射回原文（`password`、全角数字等绕过失效）。
+- **审计不落原文**：默认只存 `previewValue`（前 2…后 2 位），`audit_db.persist_raw_values` 显式开启才落原文；命中附带来源规则（`rulelist:<名>` / `keywords` / `ner-presidio`）。
+- **管理端加固**：写 API 要求 `X-VG-Admin-Request: 1` 并校验 `Origin`/`Sec-Fetch-Site`（CSRF）；`/auth/setup` 仅限本机 loopback 直连；只有 origin-form 请求会路由到管理端；登录连续失败指数退避；管理操作元审计；CA 重新生成会备份并轮换旧文件；非 loopback 监听在管理页显示红色横幅。
+- **项目配置防注入**：项目级 `.vibeguard.yaml` 默认不能覆盖 `audit_db`、`proxy.listen`、`proxy.intercept_mode`、规则订阅 URL，除非显式开启 `allow_project_sensitive_overrides`。
+- **订阅防投毒**：`sha256_pin` 留空即 TOFU 钉扎，重定向目标复检；元数据记录 `last_error` 与 `consecutive_failures`（连续失败 ≥2 次管理页红色告警）。
+- **结构化脱敏补全**：覆盖 system prompt、tool 调用/结果、content parts；不再豁免 `<system-reminder>`；替换破坏 JSON 时按命中粒度回退，`invalid_json_policy=allow` 落地。
+- **占位符更稳**：新增 2 位校验位与尾部边界检查，旧 12 位格式继续兼容；残留占位符写入审计 note。
+- **WebSocket（beta）**：permessage-deflate 帧解压后脱敏（以未压缩帧转发）、帧协议校验、解析失败审计、跨消息还原。
+- **流式还原修复**：chat.completions 与 tool-call SSE delta 中的占位符正确还原。
+
+### 性能与体验
+
+- 关键词匹配（Aho-Corasick）改为排序数组转移 + 根节点直查表；脱敏请求体单趟重建。
+- 会话映射 `GetOrCreatePlaceholder` 原子化（并发同文只产生一个占位符）；WAL 批量 fsync（`session.wal_sync_interval`）并自动压缩（`session.wal_compact_bytes`）。
+- 请求侧 Content-Type 处理与响应侧对齐：mime 解析、缺类型时嗅探 JSON、`multipart/form-data` 按 part 脱敏。
+- 本地 `.vgrules` / `secret_files` 保存后自动热重载；解析错误在管理页对应列表标红。
+- 新 CLI：`vibeguard rules add/remove/list`（关键词落盘加密）、`vibeguard test --text`（加载真实配置干跑）。
+- 管理页新增「脱敏试跑」工具、端口占用/CA 未信任引导；`install.sh` 可选写入 `kimi`/`opencode` alias。
+
+对 OpenCode 也可以选择进程内插件 [opencode-vibeguard](https://github.com/inkdust2021/opencode-vibeguard)，完全不需要代理。
 
 ## CLI 命令
 
@@ -107,7 +157,7 @@ patterns:
 | `proxy.invalid_json_policy` | `partial` | 脱敏导致 JSON 非法时的策略：`partial`（按命中粒度跳过）/ `allow`（放行原文）/ `block`（拒绝请求） |
 | `proxy.websocket_redaction_beta` | `false` | WebSocket 脱敏（beta，主要面向 Codex） |
 | `patterns.ner.enabled` | `false` | NER 实体识别（需自备 Presidio Analyzer） |
-| `session.ttl` / `session.max_mappings` | `30m` / `100000` | 占位符映射的存活时间与上限 |
+| `session.ttl` / `session.max_mappings` | `1h` / `100000` | 占位符映射的存活时间与上限 |
 
 ## 规则系统
 
@@ -153,26 +203,19 @@ NER 需自备 [Presidio Analyzer](https://microsoft.github.io/presidio/) 部署�
 macOS / Linux：
 
 ```bash
-curl -fsSL https://vibeguard.top/uninstall | bash                    # 卸载
-curl -fsSL https://vibeguard.top/uninstall | bash -s -- --purge      # 连配置一起删
-curl -fsSL https://vibeguard.top/uninstall | bash -s -- --docker     # 卸载 docker 部署
+curl -fsSL https://raw.githubusercontent.com/Ignareo/VibeGuard/main/uninstall.sh | bash                    # 卸载
+curl -fsSL https://raw.githubusercontent.com/Ignareo/VibeGuard/main/uninstall.sh | bash -s -- --purge      # 连配置一起删
+curl -fsSL https://raw.githubusercontent.com/Ignareo/VibeGuard/main/uninstall.sh | bash -s -- --docker     # 卸载 docker 部署
 ```
 
 Windows（PowerShell）：
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -Command "& ([ScriptBlock]::Create((irm https://vibeguard.top/uninstall.ps1)))"
-powershell -NoProfile -ExecutionPolicy Bypass -Command "& ([ScriptBlock]::Create((irm https://vibeguard.top/uninstall.ps1))) -Purge"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "& ([ScriptBlock]::Create((irm https://raw.githubusercontent.com/Ignareo/VibeGuard/main/uninstall.ps1)))"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "& ([ScriptBlock]::Create((irm https://raw.githubusercontent.com/Ignareo/VibeGuard/main/uninstall.ps1))) -Purge"
 ```
 
 卸载脚本会尝试自动移除信任库中的 "VibeGuard CA"；失败时请手动移除。
-
-## 本 Fork 新增（Kimi Code）
-
-- **代理模式（透明脱敏 + 自动还原）**：`vibeguard kimi [args...]`；默认拦截目标已包含 `api.kimi.com`、`api.moonshot.cn`、`api.moonshot.ai`。
-- **预检插件**：`integrations/kimi-code-vibeguard/` —— Kimi Code 插件（`vibeguard-precheck`），在敏感内容发给模型前**拦截**包含密钥的用户输入和 `Bash` 命令。Kimi Code 的插件/Hook API 无法改写出站消息，因此该插件是代理模式的补充而非替代，详见其 README。
-
-对 OpenCode 也可以选择进程内插件 [opencode-vibeguard](https://github.com/inkdust2021/opencode-vibeguard)，完全不需要代理。默认拦截目标（`intercept_mode: targets`）已包含 `opencode.ai`。
 
 ## 截图
 

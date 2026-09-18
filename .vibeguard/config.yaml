@@ -1,0 +1,64 @@
+proxy:
+    listen: 127.0.0.1:28657
+    placeholder_prefix: __VG_
+    intercept_mode: global
+    websocket_redaction_beta: false
+    invalid_json_policy: partial
+patterns:
+    keywords:
+        - value: __VG_ENC_V1__:44LNGKnJPuJ1ImEkuO+W2Kz5Z0n5Tg4KH+7mR1QQuYhK+yxH4J0bzKlX5Z6yoA
+          category: TEXT
+    regex: []
+    builtin: []
+    exclude: []
+    secret_files: []
+    rule_lists:
+        - id: vibeguard-default
+          name: VibeGuard Default Rules
+          path: ""
+          url: https://raw.githubusercontent.com/Ignareo/VibeGuard/refs/heads/main/internal/defaultrules/default.vgrules
+          update_interval: 24h
+          allow_http: false
+          sha256_pin: ""
+          enabled: true
+          priority: 50
+    ner:
+        enabled: false
+        presidio_url: ""
+        language: en
+        entities: []
+        min_score: 0
+targets:
+    - host: api.anthropic.com
+      enabled: true
+    - host: api.openai.com
+      enabled: true
+    - host: api2.cursor.sh
+      enabled: true
+    - host: generativelanguage.googleapis.com
+      enabled: true
+    - host: api.moonshot.cn
+      enabled: true
+    - host: api.moonshot.ai
+      enabled: true
+    - host: api.kimi.com
+      enabled: true
+    - host: opencode.ai
+      enabled: true
+session:
+    ttl: 1h
+    max_mappings: 100000
+    wal_enabled: true
+    wal_path: ~/.vibeguard/session.wal
+    deterministic_placeholders: false
+    wal_sync_interval: 200ms
+    wal_compact_bytes: 4194304
+log:
+    level: info
+    file: ~/.vibeguard/vibeguard.log
+    redact_log: true
+audit_db:
+    enabled: false
+    path: ~/.vibeguard/audit.db
+    retention: 7d
+    persist_raw_values: null

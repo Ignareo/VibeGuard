@@ -66,11 +66,15 @@ jobs:
           echo "commit=$(git rev-parse HEAD)" >> "${GITHUB_OUTPUT}"
           echo "date=$(date -u +'%Y-%m-%dT%H:%M:%SZ')" >> "${GITHUB_OUTPUT}"
 
+      - name: 计算镜像名（GHCR 要求全小写）
+        id: image
+        run: echo "name=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/vibeguard" >> "${GITHUB_OUTPUT}"
+
       - name: 生成镜像元数据（tags/labels）
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ghcr.io/${{ github.repository_owner }}/vibeguard
+          images: ${{ steps.image.outputs.name }}
           tags: |
             type=raw,value=${{ steps.buildmeta.outputs.version }}${{ matrix.variant.suffix }}
             type=raw,value=${{ steps.buildmeta.outputs.tag }}${{ matrix.variant.suffix }}

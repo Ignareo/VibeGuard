@@ -4,13 +4,21 @@ Thank you for your interest in contributing to VibeGuard! Whether you're
 filing a bug report, suggesting a feature, improving documentation, writing
 code, or sharing `.vgrules` rule lists — every contribution is welcome.
 
+> **Fork note**: This repository is the personal fork
+> [Ignareo/VibeGuard](https://github.com/Ignareo/VibeGuard) of
+> [inkdust2021/VibeGuard](https://github.com/inkdust2021/VibeGuard).
+> Report fork-specific issues (Kimi Code support, this fork's hardening batch,
+> etc.) to this repository's issue tracker; generic fixes are also welcome as
+> upstream PRs.
+
 ## Security Vulnerabilities
 
 **Do NOT open a public issue for security vulnerabilities.**
 
-Please use [GitHub Security Advisories](https://github.com/inkdust2021/VibeGuard/security/advisories/new)
+Please use [GitHub Security Advisories](https://github.com/Ignareo/VibeGuard/security/advisories/new)
 to report security issues privately. This ensures vulnerabilities are handled
-responsibly before public disclosure.
+responsibly before public disclosure. (Generic upstream vulnerabilities can
+additionally be reported via the [upstream advisories](https://github.com/inkdust2021/VibeGuard/security/advisories/new).)
 
 Ask yourself:
 
@@ -21,7 +29,7 @@ If the answer is yes, it's likely a security issue — please report it privatel
 
 ## How to Report a Bug
 
-Open a [GitHub Issue](https://github.com/inkdust2021/VibeGuard/issues/new) and
+Open a [GitHub Issue](https://github.com/Ignareo/VibeGuard/issues/new) and
 include:
 
 1. **VibeGuard version** — run `vibeguard --version` or check the binary name
@@ -64,7 +72,7 @@ Never contributed to open source before? Check out
 ### Build and Run
 
 ```bash
-git clone https://github.com/inkdust2021/VibeGuard.git
+git clone https://github.com/Ignareo/VibeGuard.git
 cd VibeGuard
 go build -o vibeguard ./cmd/vibeguard
 ./vibeguard

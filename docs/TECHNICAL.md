@@ -139,7 +139,7 @@ flowchart LR
 
 | 包 | 职责 |
 |---|---|
-| `cmd/vibeguard` | CLI（cobra）：start/stop/run/各助手子命令/init/trust/test/version；含 zh/en 两套 init 配置模板 |
+| `cmd/vibeguard` | CLI（cobra）：start/stop/run/各助手子命令/init/trust/test/rules/version；`test --text` 干跑（加载真实配置，镜像 proxy 的识别器组装，临时 session 目录）；含 zh/en 两套 init 配置模板 |
 | `internal/proxy` | MITM 核心（goproxy）：CONNECT、拦截模式、请求/响应门控、脱敏/还原装配、审计发射、配置热加载 |
 | `internal/promptredact` | chat-API JSON 体的结构化按字段脱敏 |
 | `internal/pii_next` | 新一代脱敏流水线：归一化 → 多识别器 → 优先级贪心选择 → 单趟重建 |
@@ -221,7 +221,7 @@ __VG_<CATEGORY>_<hash12><checksum2>__
 `internal/session.Manager` 保存 占位符 ↔ 原文 映射：
 
 - `GetOrCreatePlaceholder(original, category, prefix)` **单次持锁原子化**——同一原文并发脱敏只产生一个占位符，无检查-再注册的竞态窗口。
-- TTL（默认 30m）+ 最大映射数（默认 10 万，LRU 驱逐）。
+- TTL（默认 1h）+ 最大映射数（默认 10 万，LRU 驱逐）。
 - WAL 用 AES-GCM 加密落盘（密钥派生自 CA 私钥），重启后恢复映射。
 - 批量 fsync：`SetAsyncFlush` 按 `session.wal_sync_interval`（默认 200ms）或 64 条批量刷盘，崩溃窗口内有界；WAL 超过 `session.wal_compact_bytes` 自动压缩重写。
 
@@ -300,12 +300,12 @@ RUN pip install --no-cache-dir jieba && \
 | `patterns.rule_lists` | 内置默认订阅 | `.vgrules` 本地路径或订阅（支持 `sha256_pin`） |
 | `patterns.secret_files` | `[]` | 从文件导入 secret（dotenv/lines） |
 | `patterns.ner.*` | 关闭 | Presidio 接线：`enabled` / `presidio_url` / `language` / `entities` / `min_score` |
-| `session.ttl` | `30m` | 映射存活时间 |
+| `session.ttl` | `1h` | 映射存活时间 |
 | `session.max_mappings` | `100000` | 映射上限（LRU） |
 | `session.wal_enabled` / `wal_path` | `true` / 自动 | 加密 WAL |
 | `session.wal_sync_interval` | `200ms` | WAL 批量刷盘间隔（`0` 或负值 = 同步刷盘） |
-| `session.wal_compact_bytes` | 内置阈值 | WAL 超过该大小自动压缩 |
-| `audit_db.file` / `retention` | 关 / - | SQLite 审计（需 `vibeguard_full` 构建 tag） |
+| `session.wal_compact_bytes` | `4MB` | WAL 超过该大小自动压缩（`0` 关闭） |
+| `audit_db.enabled` / `path` / `retention` | `false` / `~/.vibeguard/audit.db` / `7d` | SQLite 审计（需 `vibeguard_full` 构建 tag） |
 | `audit_db.persist_raw_values` | `false` | 持久化命中原文（**不建议开启**） |
 | `allow_project_sensitive_overrides` | `false` | 允许项目级 `.vibeguard.yaml` 覆盖安全敏感字段（`audit_db` / `proxy.listen` / `proxy.intercept_mode` / `rule_lists` 订阅 URL）；默认忽略并 Warn |
 | `log.level` / `log.redact_log` | `info` / `true` | 日志级别 / 日志脱敏 |
@@ -315,15 +315,14 @@ RUN pip install --no-cache-dir jieba && \
 ## 构建与测试
 
 ```bash
-go build ./... && go vet ./... && go test ./...
+go build ./... && go build -tags vibeguard_full ./... && go vet ./... && go test ./...
 gofmt -l cmd internal   # 你改过的文件不应出现在输出里
 ```
 
 - 中国境内拉依赖可能需要镜像：`GOPROXY=https://goproxy.cn,direct`。
-- SQLite 审计：`go build -tags vibeguard_full ./...`。
 - **上游既有问题**（不要"顺手修"，也不要归因给你的改动）：
   - `go vet` 在 `internal/wsproxy/transform_conn.go` 报 `ReadFrom` 签名问题；
-  - `gofmt -l` 会列出 `internal/admin/admin.go` 和 `internal/auditdb/*.go`。
+  - `gofmt -l` 会列出 `internal/auditdb/*.go`（改到哪个文件就格式化哪个）。
 - 冒烟测试：`go build -o /tmp/vibeguard-dev ./cmd/vibeguard && /tmp/vibeguard-dev run env | grep -i proxy`，然后 `/tmp/vibeguard-dev stop`。
 
 ## 新增 CLI 助手适配指南
