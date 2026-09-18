@@ -20,6 +20,14 @@ type Config struct {
 	Log      LogConfig      `yaml:"log"`
 	// AuditDB controls whether audit events are persisted to SQLite (only available in the "full" build; disabled by default).
 	AuditDB AuditDBConfig `yaml:"audit_db"`
+	// AllowProjectSensitiveOverrides allows a project-level .vibeguard.yaml to override
+	// security-sensitive settings (the whole audit_db section, proxy.listen,
+	// proxy.intercept_mode, and URL-based rule_lists subscriptions). Default false:
+	// those project-level overrides are ignored with a warning log, so a malicious
+	// project directory cannot redirect the audit database, widen TLS interception, or
+	// add attacker-controlled subscriptions. Only meaningful in the global config —
+	// the project-level value of this flag itself is ignored for the decision.
+	AllowProjectSensitiveOverrides bool `yaml:"allow_project_sensitive_overrides"`
 }
 
 // ProxyConfig holds proxy server settings
@@ -82,8 +90,8 @@ type RuleListConfig struct {
 	// AllowHTTP allows http:// subscriptions when true (unsafe; default only allows https://).
 	AllowHTTP bool `yaml:"allow_http" json:"allow_http"`
 	// SHA256Pin pins the subscription content hash (URL mode only) to defeat rule-list poisoning:
-	// - empty: no pinning (HTTPS only)
-	// - "tofu": trust-on-first-use; the first accepted content hash is pinned and later mismatches are rejected
+	// - empty (default): trust-on-first-use — the first accepted content hash is pinned and later mismatches are rejected
+	// - "tofu": same as empty, written explicitly
 	// - 64-char hex: the content sha256 must match exactly, otherwise the update is rejected
 	SHA256Pin string `yaml:"sha256_pin" json:"sha256_pin"`
 	// Enabled controls whether this rule list participates in matching.
@@ -226,6 +234,7 @@ var defaultConfig = Config{
 		{Host: "api.moonshot.cn", Enabled: true},
 		{Host: "api.moonshot.ai", Enabled: true},
 		{Host: "api.kimi.com", Enabled: true},
+		{Host: "opencode.ai", Enabled: true},
 	},
 	Session: SessionConfig{
 		TTL:                       "1h",
@@ -246,6 +255,8 @@ var defaultConfig = Config{
 		Path:      "~/.vibeguard/audit.db",
 		Retention: "7d",
 	},
+	// Project-level .vibeguard.yaml must not override security-sensitive settings unless explicitly allowed.
+	AllowProjectSensitiveOverrides: false,
 }
 
 // ConfigPath returns the expanded config file path
@@ -349,6 +360,14 @@ type Manager struct {
 	// patternCrypto persists patterns.keywords/exclude values in encrypted form (in-memory values remain plaintext).
 	// This requires the caller to inject a key (typically derived from the CA private key).
 	patternCrypto *patternCrypto
+	// watchFiles is the current set of referenced local files (path-mode rule lists and
+	// secret_files) whose changes also trigger the Watch onChange callback; recomputed
+	// after every successful reload. Guarded by mu.
+	watchFiles map[string]struct{}
+	// watchExtraDirs are the parent directories of watchFiles currently added to the
+	// watcher, tracked separately from the config dirs so stale ones can be removed.
+	// Guarded by mu.
+	watchExtraDirs map[string]struct{}
 }
 
 // NewManager creates a new config manager
@@ -411,6 +430,11 @@ func (m *Manager) Load() error {
 			for i := range projectCfg.Patterns.SecretFiles {
 				projectCfg.Patterns.SecretFiles[i].Path = resolveRelativePath(baseDir, projectCfg.Patterns.SecretFiles[i].Path)
 			}
+		}
+		// Security: unless the global config explicitly allows it, drop project-level
+		// overrides for security-sensitive fields before merging (with warning logs).
+		if !cfg.AllowProjectSensitiveOverrides {
+			projectCfg = stripSensitiveProjectOverrides(projectCfg, projectPath)
 		}
 		// Merge configs
 		cfg = mergeConfigs(cfg, projectCfg)
@@ -751,6 +775,10 @@ func (m *Manager) Watch(onChange func()) error {
 		}
 	}
 
+	// Watch the parent dirs of referenced local files (path-mode rule lists and
+	// secret_files) so editing them also triggers a reload.
+	m.refreshWatchedFilesLocked()
+
 	go func() {
 		for {
 			select {
@@ -764,7 +792,25 @@ func (m *Manager) Watch(onChange func()) error {
 					slog.Info("Config file changed, reloading...")
 					if err := m.Load(); err != nil {
 						slog.Error("Failed to reload config", "error", err)
-					} else if onChange != nil {
+						continue
+					}
+					// The set of referenced local files may have changed with the config.
+					m.mu.Lock()
+					m.refreshWatchedFilesLocked()
+					m.mu.Unlock()
+					if onChange != nil {
+						onChange()
+					}
+					continue
+				}
+				// Referenced local file (rule list / secret file) changed: the config
+				// itself is unchanged, so skip Load and just notify the consumer.
+				m.mu.RLock()
+				_, isWatchedFile := m.watchFiles[name]
+				m.mu.RUnlock()
+				if isWatchedFile {
+					slog.Info("Referenced rule/secret file changed, reloading...", "path", name)
+					if onChange != nil {
 						onChange()
 					}
 				}
@@ -780,15 +826,147 @@ func (m *Manager) Watch(onChange func()) error {
 	return nil
 }
 
+// referencedLocalFiles returns the absolute paths of local files referenced by the
+// config whose changes should trigger a reload: enabled path-mode rule lists (URL-mode
+// lists are managed by the subscription manager, not fsnotify) and enabled secret_files.
+// Paths are ~-expanded and made absolute; relative rule-list paths resolve against the
+// process working directory, matching how the proxy opens them at runtime (secret_files
+// paths were already resolved relative to their defining config file by Load).
+func referencedLocalFiles(cfg Config) map[string]struct{} {
+	files := make(map[string]struct{})
+	add := func(p string) {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			return
+		}
+		p = expandPath(p)
+		if abs, err := filepath.Abs(p); err == nil {
+			p = abs
+		}
+		files[filepath.Clean(p)] = struct{}{}
+	}
+	for _, rl := range cfg.Patterns.RuleLists {
+		if !rl.Enabled || strings.TrimSpace(rl.URL) != "" {
+			continue
+		}
+		add(rl.Path)
+	}
+	for _, sf := range cfg.Patterns.SecretFiles {
+		if sf.Enabled != nil && !*sf.Enabled {
+			continue
+		}
+		add(sf.Path)
+	}
+	return files
+}
+
+// refreshWatchedFilesLocked recomputes the watched set of referenced local files and
+// diffs their parent directories against the extra dirs currently added to the watcher,
+// adding new ones and removing stale ones. Must be called with m.mu held.
+// Parent dirs are watched (rather than the files themselves) so that file creation,
+// atomic-save renames and deletion are all observed; a not-yet-existing file simply
+// contributes its parent dir. Dirs that fail to be added are skipped with a warning so
+// a single bad path cannot break config watching.
+func (m *Manager) refreshWatchedFilesLocked() {
+	if m.watcher == nil {
+		return
+	}
+	if m.watchExtraDirs == nil {
+		m.watchExtraDirs = make(map[string]struct{})
+	}
+	m.watchFiles = referencedLocalFiles(m.config)
+	dirs := make(map[string]struct{}, len(m.watchFiles))
+	for f := range m.watchFiles {
+		dirs[filepath.Dir(f)] = struct{}{}
+	}
+	// The config dirs are owned by Watch itself; never add/remove them here (removing
+	// a dir shared with the config files would silently break config watching).
+	for _, d := range m.configWatchDirs() {
+		delete(dirs, d)
+	}
+	for dir := range m.watchExtraDirs {
+		if _, ok := dirs[dir]; !ok {
+			_ = m.watcher.Remove(dir)
+			delete(m.watchExtraDirs, dir)
+		}
+	}
+	for dir := range dirs {
+		if _, ok := m.watchExtraDirs[dir]; ok {
+			continue
+		}
+		if err := m.watcher.Add(dir); err != nil {
+			slog.Warn("Failed to watch directory of a referenced rule/secret file; edits to it will not trigger reload", "dir", dir, "error", err)
+			continue
+		}
+		m.watchExtraDirs[dir] = struct{}{}
+	}
+}
+
+// configWatchDirs returns the directories that Watch itself adds for the config files.
+func (m *Manager) configWatchDirs() []string {
+	cfgPath := m.configPath
+	if cfgPath == "" {
+		cfgPath = ConfigPath()
+	}
+	projectPath := m.projectPath
+	if projectPath == "" {
+		projectPath = ProjectConfigPath()
+	}
+	return []string{
+		filepath.Dir(filepath.Clean(cfgPath)),
+		filepath.Dir(filepath.Clean(projectPath)),
+	}
+}
+
 // Close stops the config watcher
 func (m *Manager) Close() error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	if m.watcher != nil {
-		return m.watcher.Close()
+		err := m.watcher.Close()
+		m.watcher = nil
+		m.watchFiles = nil
+		m.watchExtraDirs = nil
+		return err
 	}
 	return nil
+}
+
+// stripSensitiveProjectOverrides removes security-sensitive overrides from a
+// project-level config (applied when the global allow_project_sensitive_overrides is
+// false, the default). Each removed override is logged with the project file path so
+// users can notice a project trying to change it. Local (path-based) rule lists are
+// kept: shipping project-specific keywords is a legitimate use case.
+func stripSensitiveProjectOverrides(project Config, projectPath string) Config {
+	if project.AuditDB != (AuditDBConfig{}) {
+		slog.Warn("Ignoring sensitive project-level config override (set allow_project_sensitive_overrides: true in the global config to allow it)",
+			"field", "audit_db", "path", projectPath)
+		project.AuditDB = AuditDBConfig{}
+	}
+	if strings.TrimSpace(project.Proxy.Listen) != "" {
+		slog.Warn("Ignoring sensitive project-level config override (set allow_project_sensitive_overrides: true in the global config to allow it)",
+			"field", "proxy.listen", "path", projectPath)
+		project.Proxy.Listen = ""
+	}
+	if strings.TrimSpace(project.Proxy.InterceptMode) != "" {
+		slog.Warn("Ignoring sensitive project-level config override (set allow_project_sensitive_overrides: true in the global config to allow it)",
+			"field", "proxy.intercept_mode", "path", projectPath)
+		project.Proxy.InterceptMode = ""
+	}
+	if len(project.Patterns.RuleLists) > 0 {
+		kept := make([]RuleListConfig, 0, len(project.Patterns.RuleLists))
+		for _, rl := range project.Patterns.RuleLists {
+			if u := strings.TrimSpace(rl.URL); u != "" {
+				slog.Warn("Ignoring sensitive project-level config override (set allow_project_sensitive_overrides: true in the global config to allow it)",
+					"field", "rule_lists.url", "url", u, "path", projectPath)
+				continue
+			}
+			kept = append(kept, rl)
+		}
+		project.Patterns.RuleLists = kept
+	}
+	return project
 }
 
 // mergeConfigs merges project config over global config
